@@ -1,0 +1,78 @@
+# ==========================================
+# NovaSearch Project .gitignore
+# ==========================================
+
+# Environments & Secrets
+.env
+.env.*
+!.env.example
+secrets/
+config/credentials.json
+
+# Local Data & Vector/Graph Databases
+data/
+datasets/
+local_db/
+chroma_db/
+qdrant_storage/
+neo4j_data/
+*.sqlite3
+*.db
+
+# Python & Build Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+venv/
+.venv/
+env/
+.env_folder/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing, Profiling & Logs
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+htmlcov/
+.pytest_cache/
+
+# IDE & OS Files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
