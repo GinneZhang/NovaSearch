@@ -82,5 +82,3 @@ docker-compose up -d
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 Interactive API documentation available at: http://localhost:8000/doc.
 
-## 🔒 Security & Compliance Notice
-This repository contains proprietary enterprise architecture. Never commit `.env` files, production database credentials, or real customer datasets. All raw data must remain in the `.gitignore` excluded directories.
