@@ -55,6 +55,7 @@ Our pipeline is designed for extreme reliability, logical reasoning, and factual
 ├── docker-compose.yml    # Local Core Infra (Postgres, Redis, Neo4j)
 ├── requirements.txt      # Dependencies
 └── main.py               # Application entry point
+```
 
 ## 🚀 Getting Started (Local Development)
 
