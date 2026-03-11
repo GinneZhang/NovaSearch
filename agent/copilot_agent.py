@@ -31,16 +31,26 @@ class EnterpriseCopilotAgent:
     Retrieval system, and the LLM for grounded response generation.
     """
 
-    def __init__(self, model: str = "gpt-4-turbo-preview"):
-        """Initialize the OpenAi client, retrieval system, and Redis memory."""
-        self.model = model
+    def __init__(self, model_provider: str = "openai", model: Optional[str] = None):
+        """Initialize the LLM client, retrieval system, and Redis memory."""
+        self.model_provider = model_provider.lower()
         
-        # Load keys
+        # Setup OpenAI (needed as default fallback and Consistency Evaluator)
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         if not self.openai_api_key:
-            logger.warning("OPENAI_API_KEY missing from environment. Agent will fail on generate().")
-            
-        self.client = openai.OpenAI(api_key=self.openai_api_key)
+            logger.warning("OPENAI_API_KEY missing from environment.")
+        self.openai_client = openai.OpenAI(api_key=self.openai_api_key)
+        
+        if self.model_provider == "anthropic":
+            self.model = model or "claude-3-haiku-20240307"
+            self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not self.anthropic_api_key:
+                logger.warning("ANTHROPIC_API_KEY missing from environment.")
+            import anthropic
+            self.client = anthropic.Anthropic(api_key=self.anthropic_api_key)
+        else:
+            self.model = model or "gpt-4-turbo-preview"
+            self.client = self.openai_client
         
         # Instantiate Tri-Engine Retrieval Coordinator
         self.retriever = HybridSearchCoordinator()
@@ -119,16 +129,27 @@ If the user greets you or asks about your capabilities, you may respond naturall
         messages.append({"role": "user", "content": query})
 
         try:
-             response = self.client.chat.completions.create(
-                 model="gpt-3.5-turbo",
-                 messages=messages, # type: ignore
-                 temperature=0.0,
-                 max_tokens=10
-             )
-             intent = response.choices[0].message.content.strip().upper() # type: ignore
-             if "CLARIFICATION" in intent:
-                 return "CLARIFICATION"
-             return "SEARCH"
+            if self.model_provider == "anthropic":
+                response = self.client.messages.create(
+                    model="claude-3-haiku-20240307",
+                    system=prompt,
+                    messages=[{"role": m["role"], "content": m["content"]} for m in messages[1:]],
+                    max_tokens=10,
+                    temperature=0.0
+                )
+                intent = response.content[0].text.strip().upper()
+            else:
+                response = self.client.chat.completions.create(
+                     model="gpt-3.5-turbo",
+                     messages=messages, # type: ignore
+                     temperature=0.0,
+                     max_tokens=10
+                 )
+                intent = response.choices[0].message.content.strip().upper() # type: ignore
+                
+            if "CLARIFICATION" in intent:
+                return "CLARIFICATION"
+            return "SEARCH"
         except Exception as e:
              logger.warning("Intent classification failed, defaulting to SEARCH: %s", str(e))
              return "SEARCH"
@@ -154,13 +175,24 @@ If the user greets you or asks about your capabilities, you may respond naturall
         
         try:
             logger.info("Executing Semantic Query Rewriter...")
-            response = self.client.chat.completions.create(
-                 model="gpt-3.5-turbo",
-                 messages=messages, # type: ignore
-                 temperature=0.0,
-                 max_tokens=256
-            )
-            rewritten_query = response.choices[0].message.content.strip() # type: ignore
+            if self.model_provider == "anthropic":
+                response = self.client.messages.create(
+                     model="claude-3-haiku-20240307",
+                     system=prompt,
+                     messages=[{"role": "user", "content": user_prompt}],
+                     max_tokens=256,
+                     temperature=0.0
+                )
+                rewritten_query = response.content[0].text.strip()
+            else:
+                response = self.client.chat.completions.create(
+                     model="gpt-3.5-turbo",
+                     messages=messages, # type: ignore
+                     temperature=0.0,
+                     max_tokens=256
+                )
+                rewritten_query = response.choices[0].message.content.strip() # type: ignore
+            
             logger.info("Original: '%s' | Rewritten: '%s'", query, rewritten_query)
             return rewritten_query
         except Exception as e:
@@ -226,24 +258,40 @@ If the user greets you or asks about your capabilities, you may respond naturall
         messages.append({"role": "user", "content": final_user_content})
         
         try:
-            logger.info("Executing OpenAI generation (Model: %s) with stream=True...", self.model)
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages, # type: ignore
-                temperature=0.0,
-                max_tokens=1024,
-                stream=True
-            )
-            
             final_answer = ""
-            for chunk in response:
-                if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
-                     continue
-                delta = chunk.choices[0].delta
-                if getattr(delta, "content", None):
-                    token = delta.content
-                    final_answer += token
-                    yield {"type": "token", "content": token}
+            if self.model_provider == "anthropic":
+                logger.info("Executing Anthropic generation (Model: %s) with stream=True...", self.model)
+                system_prompt = self._build_system_prompt()
+                anthropic_messages = [{"role": m["role"], "content": m["content"]} for m in messages[1:]]
+                
+                with self.client.messages.stream(
+                    model=self.model,
+                    system=system_prompt,
+                    messages=anthropic_messages,
+                    max_tokens=1024,
+                    temperature=0.0
+                ) as stream:
+                    for text in stream.text_stream:
+                        final_answer += text
+                        yield {"type": "token", "content": text}
+            else:
+                logger.info("Executing OpenAI generation (Model: %s) with stream=True...", self.model)
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages, # type: ignore
+                    temperature=0.0,
+                    max_tokens=1024,
+                    stream=True
+                )
+                
+                for chunk in response:
+                    if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
+                         continue
+                    delta = chunk.choices[0].delta
+                    if getattr(delta, "content", None):
+                        token = delta.content
+                        final_answer += token
+                        yield {"type": "token", "content": token}
             
             # 6. Save new turn to Semantic Memory asynchronously (Threadpool handled by FastAPI)
             self.memory.add_message(sid, "user", query)
@@ -251,7 +299,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
             
             # Run Real-time Consistency Evaluation
             from agent.consistency import ConsistencyEvaluator
-            evaluator = ConsistencyEvaluator(self.client)
+            evaluator = ConsistencyEvaluator(self.openai_client)
             eval_result = evaluator.evaluate(final_answer, context_str)
             
             yield {

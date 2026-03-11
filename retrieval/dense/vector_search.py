@@ -3,6 +3,8 @@ Dense Retrieval Module for NovaSearch.
 """
 import logging
 from typing import List, Dict, Any
+from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -16,7 +18,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-class DenseRetriever:
+class BaseDenseRetriever(ABC):
+    """Abstract base class for dense vector retrievers."""
+    
+    @abstractmethod
+    def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
+        pass
+
+class PGVectorDenseRetriever(BaseDenseRetriever):
     """Handles semantic vector similarity search via pgvector."""
     
     def __init__(self, pg_conn, embedding_model_name: str = "all-MiniLM-L6-v2"):

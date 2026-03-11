@@ -22,8 +22,8 @@ import spacy
 import psycopg2
 from neo4j import GraphDatabase
 
-from retrieval.dense.vector_search import DenseRetriever
-from retrieval.sparse.keyword_search import SparseRetriever
+from retrieval.dense.vector_search import PGVectorDenseRetriever
+from retrieval.sparse.keyword_search import PostgresFTSSparseRetriever
 from retrieval.reranker.rrf_fusion import reciprocal_rank_fusion
 from retrieval.reranker.cross_encoder import CrossEncoderReranker
 
@@ -62,8 +62,8 @@ class HybridSearchCoordinator:
             self.pg_conn = None
 
         # 2. Setup Retrievers & Reranker
-        self.dense_retriever = DenseRetriever(self.pg_conn, embedding_model_name)
-        self.sparse_retriever = SparseRetriever(self.pg_conn)
+        self.dense_retriever = PGVectorDenseRetriever(self.pg_conn, embedding_model_name)
+        self.sparse_retriever = PostgresFTSSparseRetriever(self.pg_conn)
         self.cross_encoder = CrossEncoderReranker()
 
         # 3. Setup Neo4j (Graph Retrieval)

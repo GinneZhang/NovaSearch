@@ -3,6 +3,8 @@ Sparse Retrieval Module for NovaSearch.
 """
 import logging
 from typing import List, Dict, Any
+from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod
 
 try:
     from psycopg2.extras import DictCursor
@@ -11,7 +13,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-class SparseRetriever:
+class BaseSparseRetriever(ABC):
+    """Abstract base class for sparse keyword retrievers."""
+    
+    @abstractmethod
+    def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
+        pass
+
+class PostgresFTSSparseRetriever(BaseSparseRetriever):
     """Handles PostgreSQL Full-Text Search (Keyword Matching)."""
     
     def __init__(self, pg_conn):

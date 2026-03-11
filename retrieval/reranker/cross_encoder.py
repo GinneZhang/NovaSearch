@@ -3,6 +3,7 @@ Cross-Encoder Reranking Module for NovaSearch.
 """
 import logging
 from typing import List, Dict, Any
+from abc import ABC, abstractmethod
 
 try:
     from sentence_transformers import CrossEncoder
@@ -11,7 +12,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-class CrossEncoderReranker:
+class BaseReranker(ABC):
+    """Abstract base class for cross-encoder or other rescoring models."""
+    
+    @abstractmethod
+    def rerank(self, query: str, hits: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
+        pass
+
+class CrossEncoderReranker(BaseReranker):
     """
     Advanced reranking using a HuggingFace Cross-Encoder.
     Unlike Bi-Encoders (dense vectors), Cross-Encoders process the query and 

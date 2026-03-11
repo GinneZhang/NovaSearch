@@ -7,7 +7,7 @@ import uuid
 import logging
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import json
@@ -24,6 +24,7 @@ from psycopg2.extras import Json
 from core.db_init import initialize_databases
 from api.schemas import QueryRequest, QueryResponse, DocumentUploadRequest, SourceChunk
 from agent.copilot_agent import EnterpriseCopilotAgent
+from core.auth import get_api_key
 from ingestion.chunking.semantic_chunker import SemanticChunker
 from ingestion.graph_build.kg_builder import KGBuilder
 
@@ -73,7 +74,7 @@ async def health_check():
     return {"status": "ok", "service": "NovaSearch API"}
 
 
-@app.post("/ask")
+@app.post("/ask", dependencies=[Depends(get_api_key)])
 def ask_copilot(request: QueryRequest):
     """
     Main endpoint for the Enterprise Copilot.
@@ -169,7 +170,7 @@ def _insert_chunks_to_postgres(doc_id: str, title: str, section: str, chunks: li
         conn.close()
 
 
-@app.post("/ingest")
+@app.post("/ingest", dependencies=[Depends(get_api_key)])
 def ingest_document(request: DocumentUploadRequest):
     """
     Ingests a new document into the system.
