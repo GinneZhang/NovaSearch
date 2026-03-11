@@ -64,32 +64,23 @@ Our pipeline is designed for extreme reliability, logical reasoning, and factual
 * Git
 
 ### 2. Installation
-
-```bash
 git clone https://github.com/YourUsername/NovaSearch.git
 cd NovaSearch
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-
 ### 3. Environment Setup
 Copy the configuration template and populate your API Keys (OpenAI, Anthropic) and DB credentials:
-\`\`\`bash
 cp .env.example .env
-\`\`\`
 
 ### 4. Spin up Core Infrastructure
 Start the local persistence layer (PostgreSQL w/ pgvector, Redis, Neo4j) via Docker:
-\`\`\`bash
 docker-compose up -d
-\`\`\`
 
 ### 5. Launch the Application
-\`\`\`bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
-\`\`\`
-Interactive API documentation available at: `http://localhost:8000/docs`
+Interactive API documentation available at: http://localhost:8000/doc.
 
 ## 🔒 Security & Compliance Notice
 This repository contains proprietary enterprise architecture. Never commit `.env` files, production database credentials, or real customer datasets. All raw data must remain in the `.gitignore` excluded directories.
