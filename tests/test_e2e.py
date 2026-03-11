@@ -87,30 +87,41 @@ def test_retrieval_and_agent():
         import time
         time.sleep(1)
         
-        response = live_client.post("/ask", json=query_payload)
+        import json
         
-        assert response.status_code == 200, f"Ask failed: {response.text}"
-        data = response.json()
-        
-        # 1. Verify Answer exists
-        answer = data["answer"]
-        assert len(answer) > 10, "LLM returned an empty or abnormally short answer."
-        
-        # 2. Verify Tri-Engine retrieved the correct source
-        sources = data["sources"]
-        assert len(sources) > 0, "No sources were retrieved by HybridSearchCoordinator."
-        
-        # Check if our mock document is in the returned sources
-        mock_source_found = False
-        for s in sources:
-            if MOCK_TITLE in s.get("graph_context", {}).get("doc_title", "") or \
-               MOCK_TITLE in s.get("chunk_text", ""):
-                mock_source_found = True
-                break
-                
-        assert mock_source_found, "The ingested mock document was not found by the retrieval engine."
-        
-        # 3. Verify Source Grounding (Anti-Hallucination)
-        # The prompt strictly commands the LLM to use [Doc: <title>, Section: <section>]
-        expected_marker = f"[Doc: {MOCK_TITLE}, Section: {MOCK_SECTION}]"
-        assert expected_marker in answer, f"LLM failed to inject the required source marker. Expected '{expected_marker}' somewhere in the output. Got: {answer}"
+        with live_client.stream("POST", "/ask", json=query_payload) as response:
+            assert response.status_code == 200, f"Ask failed: {response.text}"
+            
+            answer = ""
+            sources = []
+            
+            for line in response.iter_lines():
+                if line:
+                    try:
+                        data = json.loads(line)
+                        if data.get("type") == "token":
+                            answer += data.get("content", "")
+                        elif data.get("type") == "answer_metadata":
+                            sources = data.get("sources", [])
+                    except json.JSONDecodeError:
+                        pass
+                        
+            # 1. Verify Answer exists
+            assert len(answer) > 10, "LLM returned an empty or abnormally short answer."
+            
+            # 2. Verify Tri-Engine retrieved the correct source
+            assert len(sources) > 0, "No sources were retrieved by HybridSearchCoordinator."
+            
+            # Check if our mock document is in the returned sources
+            mock_source_found = False
+            for s in sources:
+                if MOCK_TITLE in s.get("graph_context", {}).get("doc_title", "") or \
+                   MOCK_TITLE in s.get("chunk_text", ""):
+                    mock_source_found = True
+                    break
+                    
+            assert mock_source_found, "The ingested mock document was not found by the retrieval engine."
+            
+            # 3. Verify Source Grounding (Anti-Hallucination)
+            expected_marker = f"[Doc: {MOCK_TITLE}, Section: {MOCK_SECTION}]"
+            assert expected_marker in answer, f"LLM failed to inject the required source marker. Expected '{expected_marker}' somewhere in the output. Got: {answer}"
