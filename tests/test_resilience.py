@@ -19,50 +19,43 @@ import json
 class TestConsistencyResilience:
     """Verify ConsistencyEvaluator blocks output on errors, not passes."""
     
-    @patch("agent.consistency.openai")
-    def test_evaluator_blocks_on_openai_timeout(self, mock_openai):
+    def test_evaluator_blocks_on_openai_timeout(self):
         """If OpenAI times out, the evaluator must BLOCK, not pass."""
         from agent.consistency import ConsistencyEvaluator
         
         mock_client = MagicMock()
-        mock_openai.OpenAI.return_value = mock_client
         mock_client.chat.completions.create.side_effect = TimeoutError("Connection timed out")
         
-        evaluator = ConsistencyEvaluator()
-        evaluator.client = mock_client
+        evaluator = ConsistencyEvaluator(openai_client=mock_client)
         
         result = evaluator.evaluate(
-            answer="Some answer",
-            context="Some context",
-            query="Some query"
+            generated_answer="Some answer",
+            context="Some context"
         )
         
-        assert result["is_consistent"] is False, "Evaluator must BLOCK on timeout"
-        assert "blocked_reason" in result or result.get("score", 1.0) == 0.0
+        assert result.get("hallucination_warning") is True, "Evaluator must BLOCK on timeout"
+        assert result.get("consistency_score", 1.0) == 0.0
     
-    @patch("agent.consistency.openai")
-    def test_evaluator_blocks_on_invalid_json(self, mock_openai):
+    def test_evaluator_blocks_on_invalid_json(self):
         """If LLM returns malformed JSON, evaluator must BLOCK."""
         from agent.consistency import ConsistencyEvaluator
         
         mock_client = MagicMock()
-        mock_openai.OpenAI.return_value = mock_client
         
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "This is not JSON at all"
         mock_client.chat.completions.create.return_value = mock_response
         
-        evaluator = ConsistencyEvaluator()
-        evaluator.client = mock_client
+        evaluator = ConsistencyEvaluator(openai_client=mock_client)
         
         result = evaluator.evaluate(
-            answer="Some answer",
-            context="Some context",
-            query="Some query"
+            generated_answer="Some answer",
+            context="Some context"
         )
         
-        assert result["is_consistent"] is False, "Evaluator must BLOCK on invalid JSON"
+        assert result.get("hallucination_warning") is True, "Evaluator must BLOCK on invalid JSON"
+        assert result.get("consistency_score", 1.0) == 0.0
 
 
 # ─── Test: Cypher Generator Self-Healing Under Neo4j Failure ───
