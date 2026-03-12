@@ -111,10 +111,11 @@ def ask_copilot(request: QueryRequest):
                         sources_schema.append({
                             "doc_id": s.get("doc_id", "unknown"),
                             "chunk_text": s.get("chunk_text", ""),
-                            "score": s.get("cross_encoder_score", s.get("score", 0.0))
+                            "score": s.get("cross_encoder_score", s.get("score", 0.0)),
+                            "graph_context": s.get("graph_context")
                         })
                     yield json.dumps({
-                        "type": "metadata",
+                        "type": "answer_metadata",
                         "sources": sources_schema,
                         "session_id": chunk.get("session_id"),
                         "consistency_score": chunk.get("consistency_score"),

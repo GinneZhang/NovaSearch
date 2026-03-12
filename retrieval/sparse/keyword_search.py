@@ -35,9 +35,9 @@ class PostgresFTSSparseRetriever(BaseSparseRetriever):
         sql = """
             SELECT 
                 doc_id, index, chunk_text, 
-                ts_rank(to_tsvector('english', chunk_text), plainto_tsquery('english', %s)) AS rank_score
+                ts_rank(to_tsvector('english', chunk_text), websearch_to_tsquery('english', %s)) AS rank_score
             FROM chunks
-            WHERE to_tsvector('english', chunk_text) @@ plainto_tsquery('english', %s)
+            WHERE to_tsvector('english', chunk_text) @@ websearch_to_tsquery('english', %s)
             ORDER BY rank_score DESC
             LIMIT %s;
         """

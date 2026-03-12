@@ -11,6 +11,10 @@ from fastapi.testclient import TestClient
 from dotenv import load_dotenv
 load_dotenv()
 
+os.environ["VECTOR_STORE_TYPE"] = "pgvector"
+os.environ["SPARSE_STORE_TYPE"] = "fts"
+os.environ["RERANKER_TYPE"] = "crossencoder"
+
 from api.main import app
 
 client = TestClient(app)
@@ -78,9 +82,9 @@ def test_retrieval_and_agent():
     }
     
     with TestClient(app) as live_client:
-        # Give DBs a fraction of a second to sync
+        # Give DBs a few seconds to sync
         import time
-        time.sleep(1)
+        time.sleep(3)
         
         with live_client.stream("POST", "/ask", json=query_payload) as response:
             if response.status_code != 200:
