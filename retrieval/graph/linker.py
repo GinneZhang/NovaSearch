@@ -7,7 +7,7 @@ embedding similarity search against the Entity node index.
 
 import os
 import logging
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
 
