@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: novasearch-retrieval
+  labels:
+    app: novasearch
+    component: retrieval
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: novasearch
+      component: retrieval
+  template:
+    metadata:
+      labels:
+        app: novasearch
+        component: retrieval
+    spec:
+      containers:
+        - name: retrieval
+          image: novasearch/retrieval:latest
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - secretRef:
+                name: novasearch-secrets
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - |
+                  import psycopg2, redis, os
+                  # Check PostgreSQL
+                  psycopg2.connect(
+                      host=os.getenv('POSTGRES_HOST'),
+                      port=os.getenv('POSTGRES_PORT', '5432'),
+                      dbname=os.getenv('POSTGRES_DB'),
+                      user=os.getenv('POSTGRES_USER'),
+                      password=os.getenv('POSTGRES_PASSWORD')
+                  ).close()
+                  # Check Redis
+                  redis.Redis(
+                      host=os.getenv('REDIS_HOST', 'localhost'),
+                      port=int(os.getenv('REDIS_PORT', '6379'))
+                  ).ping()
+            initialDelaySeconds: 45
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - |
+                  import psycopg2, redis, os
+                  psycopg2.connect(
+                      host=os.getenv('POSTGRES_HOST'),
+                      port=os.getenv('POSTGRES_PORT', '5432'),
+                      dbname=os.getenv('POSTGRES_DB'),
+                      user=os.getenv('POSTGRES_USER'),
+                      password=os.getenv('POSTGRES_PASSWORD')
+                  ).close()
+                  redis.Redis(
+                      host=os.getenv('REDIS_HOST', 'localhost'),
+                      port=int(os.getenv('REDIS_PORT', '6379'))
+                  ).ping()
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2Gi"
+            limits:
+              cpu: "4000m"
+              memory: "8Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: novasearch-retrieval
+  labels:
+    app: novasearch
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8001
+      targetPort: 8001
+      protocol: TCP
+  selector:
+    app: novasearch
+    component: retrieval
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: novasearch-retrieval-hpa
+  labels:
+    app: novasearch
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: novasearch-retrieval
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75

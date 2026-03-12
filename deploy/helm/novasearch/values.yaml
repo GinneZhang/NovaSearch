@@ -1,0 +1,80 @@
+# NovaSearch Helm Values — Default Configuration
+# 默认 Helm 配置
+
+replicaCount:
+  api: 2
+  retrieval: 2
+
+image:
+  api:
+    repository: novasearch/api
+    tag: latest
+    pullPolicy: IfNotPresent
+  retrieval:
+    repository: novasearch/retrieval
+    tag: latest
+    pullPolicy: IfNotPresent
+
+service:
+  api:
+    type: ClusterIP
+    port: 8000
+  retrieval:
+    type: ClusterIP
+    port: 8001
+
+autoscaling:
+  api:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilization: 70
+    targetMemoryUtilization: 80
+  retrieval:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilization: 65
+    targetMemoryUtilization: 75
+
+resources:
+  api:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+  retrieval:
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+
+probes:
+  liveness:
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    failureThreshold: 3
+
+env:
+  OPENAI_API_KEY: ""
+  POSTGRES_HOST: postgresql
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: novasearch
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: ""
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  NEO4J_URI: bolt://neo4j:7687
+  NEO4J_USER: neo4j
+  NEO4J_PASSWORD: ""
+  API_ENV: production
+  LOG_LEVEL: WARNING
+  PREFLIGHT_MODE: auto

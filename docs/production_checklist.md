@@ -101,5 +101,35 @@ python tests/load_test.py
 
 ---
 
-**Version / 版本**: v1.0.0
+## 8. Pre-Flight Guardrails (Phase 13) / 预检护栏
+
+- [ ] `PREFLIGHT_MODE` env var set (`auto`, `always`, or `never`) / 设置 `PREFLIGHT_MODE` 环境变量
+- [ ] High-stakes queries trigger buffered validation / 高风险查询触发缓冲验证
+- [ ] Safety-block response confirmed for failed pre-flight checks / 确认预检失败时返回安全阻断响应
+- [ ] ConsistencyEvaluator threshold > 0.8 enforced / 一致性评估阈值 > 0.8 强制执行
+
+---
+
+## 9. Schema Validation (Phase 13) / Schema 验证
+
+- [ ] QueryGraphParser validates triplets against live Neo4j schema / 查询图谱解析器验证三元组
+- [ ] CypherGenerator returns `CypherResult` structured objects / CypherGenerator 返回结构化对象
+- [ ] Symbolic path validator rejects unknown labels/relationships / 符号路径验证拒绝未知标签/关系
+- [ ] Table Schema Summary headers are generated for table chunks / 表格 Schema 摘要标题已生成
+
+---
+
+## 10. Kubernetes Deployment (Phase 13) / K8s 部署
+
+- [ ] `deploy/k8s/api-deployment.yaml` applied / 已部署 API 清单
+- [ ] `deploy/k8s/retrieval-deployment.yaml` applied / 已部署检索清单
+- [ ] HPA autoscaling verified (API: 2-10, Retrieval: 2-8) / HPA 自动扩缩已验证
+- [ ] Liveness probes pass (`/health` for API, PG+Redis check for Retrieval) / 存活探针通过
+- [ ] Readiness probes pass / 就绪探针通过
+- [ ] Helm chart deployed via `helm install novasearch deploy/helm/novasearch/` / Helm chart 已部署
+
+---
+
+**Version / 版本**: v1.0.0 (Phase 13 hardened / 第 13 阶段加固)
 **Date / 日期**: 2026-03-12
+
