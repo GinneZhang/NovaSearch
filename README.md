@@ -283,4 +283,4 @@ Then / 然后:
 
 ---
 
-**Version / 版本**: v1.0.0 | **License / 许可**: MIT | **Built with ❤️ by the NovaSearch Team / 由 NovaSearch 团队用心打造**
+**Version / 版本**: v1.0.0 | **License / 许可**: MIT | **Built with ❤️ by Ginne**
