@@ -35,6 +35,8 @@ Our objective is to deliver highly accurate, explainable, and hallucination-resi
 
 - **Probabilistic Entity Linking / 概率实体链接**: Vector similarity with confidence scoring; ambiguous matches (conf < 0.8) trigger proactive user clarification. / 向量相似度置信度评分；模糊匹配（置信度 < 0.8）触发主动用户澄清。
 - **Cypher Linting & Validation / Cypher 校验与验证**: Schema-aware validator rejects write operations and unknown labels before execution. / Schema 感知验证器在执行前拒绝写操作和未知标签。
+- **Structured Cypher Objects / 结构化 Cypher 对象**: `CypherResult` dataclass with nodes, edges, properties, and path existence validation. / `CypherResult` 数据类，包含节点、边、属性和路径验证。
+- **Symbolic Path Validator / 符号路径验证**: Checks label/rel existence against live schema before Cypher execution. / Cypher 执行前检查标签/关系是否存在于实时 Schema。
 - **Dynamic Schema Introspection / 动态 Schema 内省**: Live `CALL db.labels()` / `CALL db.relationshipTypes()` with property sampling. / 实时 Schema 查询与属性取样。
 - **Self-Healing Cypher / 自修复 Cypher**: Error-feedback retry loop (max 2 retries) auto-repairs invalid Cypher. / 错误反馈重试循环（最多 2 次）自动修复无效查询。
 - **Factual Grounding / 事实约束**: KG constraints injected into generative context to suppress LLM hallucinations. / 知识图谱约束注入生成上下文以抑制 LLM 幻觉。
@@ -42,6 +44,7 @@ Our objective is to deliver highly accurate, explainable, and hallucination-resi
 ### 4. Controlled LLM Generation / 受控 LLM 生成
 
 - Source-grounded QA with mandatory origin tracing. / 溯源式问答，强制标注信息来源。
+- **Pre-Flight Hallucination Interceptor / 预检幻觉拦截器**: Two-stage buffered generation for high-stakes queries; ConsistencyEvaluator validates before streaming (threshold > 0.8). / 高风险查询的两阶段缓冲生成；一致性评估器在流式传输前验证（阈值 > 0.8）。
 - Fail-closed `ConsistencyEvaluator` (GPT-4 Turbo) with hard timeout. / 失败封锁的 `ConsistencyEvaluator`（GPT-4 Turbo），带硬超时。
 - Iterative ReAct reasoning loop with clarification exhaustion. / 迭代 ReAct 推理循环，带澄清穷尽机制。
 
@@ -64,7 +67,7 @@ Our objective is to deliver highly accurate, explainable, and hallucination-resi
 | **Databases** | PostgreSQL + PGVector, Redis, Neo4j |
 | **Frameworks** | FastAPI, LangChain, LlamaIndex (long-context / 长上下文) |
 | **Observability / 可观测性** | `MetricsCollector` (per-engine latency, error rates, LLM scores) |
-| **Infrastructure / 基础设施** | Docker Compose (PostgreSQL, Redis, Neo4j, Elasticsearch) |
+| **Infrastructure / 基础设施** | K8s (HPA + Helm), Docker Compose |
 
 ---
 
@@ -79,7 +82,7 @@ The following capabilities are **planned but not yet implemented**:
 | **BGE / Contriever / E5 embeddings / 嵌入** | Planned / 计划中 |
 | **Claude 3 / Anthropic integration / 集成** | Planned / 计划中 |
 | **Distributed tracing (Jaeger/OTel) / 分布式追踪** | Planned / 计划中 |
-| **Production Kubernetes / 生产 K8s** | Planned / 计划中 |
+| **Production Kubernetes / 生产 K8s** | **Active — HPA + Helm / 已实现** |
 
 ---
 
@@ -96,11 +99,12 @@ The following capabilities are **planned but not yet implemented**:
 │   ├── dense/            # PGVector, FAISS, TableRetriever / 稠密检索
 │   ├── sparse/           # PostgreSQL FTS, Elasticsearch / 稀疏检索
 │   ├── reranker/         # ColBERT, MonoT5, Cross-Encoder / 重排序
-│   └── graph/            # CypherGenerator, EntityLinker / 图谱推理
+│   └── graph/            # CypherGenerator (structured), EntityLinker / 图谱推理
 ├── agent/                # State Machine, PlannerCritic, Query Parser / 状态机、规划器
 ├── scripts/              # Warmup, demo scripts / 预热与演示脚本
 ├── tests/                # Unit, Integration, Benchmark, Resilience / 测试
 ├── docs/                 # Production checklist, Release notes / 文档
+├── deploy/               # K8s manifests, Helm chart / K8s 清单、Helm chart
 ├── docker-compose.yml    # Local infrastructure / 本地基础设施
 ├── requirements.txt      # Dependencies / 依赖
 └── api/main.py           # Application entry point / 应用入口
