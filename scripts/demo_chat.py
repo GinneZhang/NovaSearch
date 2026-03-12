@@ -29,6 +29,8 @@ def chat():
 
                 print("\033[95mCopilot:\033[0m ", end="", flush=True)
                 
+                has_answer = False
+                
                 # Streaming POST request
                 with client.stream("POST", API_URL, json=payload) as response:
                     for line in response.iter_lines():
@@ -50,6 +52,7 @@ def chat():
                             elif chunk_type == "answer":
                                 # Print final answer
                                 print(f"{content}")
+                                has_answer = True
                                 
                                 # Print sources if available
                                 sources = chunk.get("sources", [])
@@ -59,11 +62,14 @@ def chat():
                                         doc = s.get("doc_id", "Unknown") if isinstance(s, dict) else s
                                         print(f"  [{idx+1}] {doc}")
                             elif chunk_type == "error":
-                                print(f"\n\033[91m[Error: {content}]\033[0m")
+                                print(f"\n\033[1m\033[91m[Error: {content}]\033[0m")
                                 
                         except json.JSONDecodeError:
                             print(f"\n[Raw Output]: {line}")
                             
+                if not has_answer:
+                    print("\033[95mCopilot: \033[0m[Generation failed or was blocked by consistency guardrails. No answer returned.]")
+                    
                 print("\n")
                 
             except KeyboardInterrupt:

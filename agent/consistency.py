@@ -28,12 +28,12 @@ class ConsistencyEvaluator:
             return {"consistency_score": 1.0, "hallucination_warning": False}
             
         system_prompt = (
-            "You are a strict anti-hallucination fact-checker. You will be provided with <Source Context> and a <Generated Answer>.\n"
-            "Your job is to determine if the <Generated Answer> contains any claims, facts, or entities NOT strictly "
-            "entailed by the <Source Context>.\n"
+            "You are a helpful anti-hallucination fact-checker. You will be provided with <Source Context> and a <Generated Answer>.\n"
+            "Your job is to determine if the <Generated Answer> contains any claims, facts, or entities that contradict or cannot be logically deduced from the <Source Context>.\n"
+            "It is OK if the answer paraphrases or logically entails information from the context; do not require exact verbatim string matches.\n"
             "Respond in JSON format with exactly two keys:\n"
             "- 'consistency_score': a float between 0.0 (total hallucination) and 1.0 (completely grounded).\n"
-            "- 'hallucination_warning': boolean (true if score < 0.8, else false)."
+            "- 'hallucination_warning': boolean (true if score < 0.6, else false)."
         )
         
         user_prompt = f"<Source Context>\n{context}\n</Source Context>\n\n<Generated Answer>\n{generated_answer}\n</Generated Answer>"

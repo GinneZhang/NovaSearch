@@ -39,7 +39,7 @@ class TaskDecomposer:
                 "You are an expert query analyzer for an enterprise search system.\n"
                 "Your task is to take a complex user query and decompose it into 2-3 atomic, standalone sub-queries.\n"
                 "If the query is already simple and atomic, just return the original query.\n"
-                "Output EXACTLY one sub-query per line. Do not number them or use bullet points.\n\n"
+                "CRITICAL: Do NOT answer the question or inject external parametric knowledge. You must ONLY break down the literal concepts provided in the user's prompt into sub-queries.\n\n"
                 "Example 1:\n"
                 "User: Compare blackout periods for SVPs and regular employees\n"
                 "Output:\n"
