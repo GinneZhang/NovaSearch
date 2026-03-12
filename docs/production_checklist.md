@@ -1,4 +1,4 @@
-# 🚀 NovaSearch v1.0.0 — Production Checklist
+# NovaSearch v1.0.0 — Production Checklist
 
 <p align="center">
   <a href="production_checklist.md">[English]</a> | <a href="production_checklist_cn.md">[中文文档]</a>
