@@ -1,4 +1,4 @@
-# 🚀 NovaSearch v1.0.0 — 发布说明
+# NovaSearch v1.0.0 — 发布说明
 
 <p align="center">
   <a href="release_notes_v1.0.0.md">[English]</a> | <a href="release_notes_v1.0.0_cn.md">[中文文档]</a>
