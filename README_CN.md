@@ -4,7 +4,7 @@
   <a href="README.md">[English]</a> | <a href="README_CN.md">[中文文档]</a>
 </p>
 
-NovaSearch 是一套生产级企业知识检索与推理系统，采用**「三引擎融合」**架构：**LLM 语义 + 混合多模态 RAG + 知识图谱推理**。
+NovaSearch 是一套生产级企业知识检索与推理系统，采用「三引擎融合」架构：LLM 语义 + 混合多模态 RAG + 知识图谱推理。
 
 我们的目标是为企业 SOP、合规文档和结构化知识提供高精度、可解释、抗幻觉的 Copilot 体验。
 
