@@ -230,7 +230,13 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 yield {"type": "thought", "content": f"Query rewritten to: '{search_query}'"}
                 
             # Use LangChain to Decompose Complex Queries
-            sub_queries = self.planner.decompose(search_query)
+            planner_result = self.planner.decompose(search_query)
+            if isinstance(planner_result, dict) and planner_result.get("type") == "clarification":
+                yield {"type": "thought", "content": "Query is completely ambiguous. Requesting clarification..."}
+                yield {"type": "clarification", "content": planner_result.get("content", "Can you please clarify your request? I need more details.")}
+                return
+                
+            sub_queries = planner_result
             if len(sub_queries) > 1:
                 yield {"type": "thought", "content": f"Task decomposed into {len(sub_queries)} sub-queries: {sub_queries}"}
             

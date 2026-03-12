@@ -91,12 +91,28 @@ class KGBuilder:
                     # Valid Neo4j property types must be primitives (no nested quotes)
                     entities = [{"name": ent.text.strip(), "type": ent.label_} for ent in doc.ents if ent.label_ in {"PERSON", "ORG", "GPE", "LOC", "PRODUCT", "EVENT"}]
                     
-                    # Deduplicate entities for the same chunk
+                    # Deduplicate and Normalize entities for the same chunk
                     seen = set()
                     unique_entities = []
+                    
+                    # Basic Synonym Map for Entity Resolution
+                    synonym_map = {
+                        "aws": "Amazon Web Services",
+                        "amazon web services": "Amazon Web Services",
+                        "gcp": "Google Cloud Platform",
+                        "google cloud": "Google Cloud Platform"
+                    }
+                    
                     for e in entities:
-                        # Normalize a bit
-                        normalized_name = e["name"].lower()
+                        # Normalize name
+                        raw_name = e["name"].strip()
+                        normalized_name = raw_name.lower()
+                        
+                        # Merge Synonyms
+                        if normalized_name in synonym_map:
+                            e["name"] = synonym_map[normalized_name]
+                            normalized_name = e["name"].lower()
+                        
                         if normalized_name not in seen and len(normalized_name) > 1:
                             seen.add(normalized_name)
                             unique_entities.append(e)

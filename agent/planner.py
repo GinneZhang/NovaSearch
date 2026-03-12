@@ -3,7 +3,7 @@ Task Decomposer using LangChain to break down complex queries.
 """
 import os
 import logging
-from typing import List
+from typing import List, Union
 
 try:
     from langchain_core.prompts import ChatPromptTemplate
@@ -39,7 +39,8 @@ class TaskDecomposer:
                 "You are an expert query analyzer for an enterprise search system.\n"
                 "Your task is to take a complex user query and decompose it into 2-3 atomic, standalone sub-queries.\n"
                 "If the query is already simple and atomic, just return the original query.\n"
-                "CRITICAL: Do NOT answer the question or inject external parametric knowledge. You must ONLY break down the literal concepts provided in the user's prompt into sub-queries.\n\n"
+                "CRITICAL: Do NOT answer the question or inject external parametric knowledge. You must ONLY break down the literal concepts provided in the user's prompt into sub-queries.\n"
+                "CRITICAL EXCEPTION: If the user's query is critically ambiguous (e.g., missing a subject, too broad, or nonsensical), you MUST NOT decompose it. Instead, you MUST output EXACTLY this JSON format and nothing else: `{\"type\": \"clarification\", \"content\": \"<your clarifying question here>\"}`\n\n"
                 "Example 1:\n"
                 "User: Compare blackout periods for SVPs and regular employees\n"
                 "Output:\n"
@@ -51,14 +52,25 @@ class TaskDecomposer:
         else:
             self.chain = None
 
-    def decompose(self, query: str) -> List[str]:
-        """Decomposes a query into atomic sub-queries using LangChain."""
+    def decompose(self, query: str) -> Union[List[str], dict]:
+        """Decomposes a query into atomic sub-queries, or returns a clarification dict if ambiguous."""
         if not self.chain:
             return [query]
             
         try:
             logger.info(f"Decomposing query using LangChain: '{query}'")
             output = self.chain.invoke({"query": query})
+            
+            # Check for clarification JSON
+            if output.strip().startswith("{") and "clarification" in output:
+                import json
+                try:
+                    parsed = json.loads(output)
+                    if parsed.get("type") == "clarification":
+                        logger.info(f"Query is ambiguous, requesting clarification: {parsed.get('content')}")
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
             
             sub_queries = [line.strip() for line in output.split("\n") if line.strip()] # type: ignore
             

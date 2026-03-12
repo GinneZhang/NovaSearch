@@ -47,6 +47,9 @@ def chat():
                                 elif chunk_type == "token":
                                     print(data.get("content", ""), end="", flush=True)
                                     received_answer = True
+                                elif chunk_type == "clarification":
+                                    print(f"\n\033[93m[Clarification Needed]: {data.get('content', '')}\033[0m")
+                                    received_answer = True
                                 elif chunk_type == "error":
                                     print(f"\n\033[1m\033[91m[Error: {data.get('content', '')}]\033[0m")
                                 elif chunk_type == "answer_metadata":

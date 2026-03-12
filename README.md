@@ -14,7 +14,7 @@ Our pipeline is designed for extreme reliability, logical reasoning, and factual
    - **Context**: Agent-based cross-session thread linking and memory state management via Redis.
 
 2. **Hybrid Multimodal Retrieval**
-   - **Tri-Retrieval Fusion**: Integrating Sparse (BM25/Elasticsearch), Dense (FAISS/BGE for text/image/table vectors), and Structural (Neo4j SPARQL) pathways.
+   - **Tri-Retrieval Fusion**: Integrating Sparse (BM25/Elasticsearch), Dense (FAISS/BGE for text/image/table vectors), and Structural (Neo4j Cypher Graph Traversal) pathways.
    - **Advanced Chunking**: Utilizing **Sliding Window + Embedding Clustering** to preserve semantic context boundaries.
    - **Reranking**: Deep contextual re-ranking via ColBERT or MonoT5.
 
@@ -54,7 +54,7 @@ Our pipeline is designed for extreme reliability, logical reasoning, and factual
 ├── tests/                # Unit/Integration test suites
 ├── docker-compose.yml    # Local Core Infra (Postgres, Redis, Neo4j)
 ├── requirements.txt      # Dependencies
-└── main.py               # Application entry point
+└── api/main.py           # Application entry point
 ```
 
 ## 🚀 Getting Started (Local Development)
