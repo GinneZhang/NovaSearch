@@ -40,6 +40,8 @@ class DocumentUploadRequest(BaseModel):
     """
     Placeholder schema for future ingestion endpoints.
     """
-    document_text: str = Field(..., description="Raw text of the document.")
-    title: str = Field(..., description="Document Title.")
-    section: str = Field(default="General", description="Section or Category of the document.")
+    title: str = Field(..., example="Q3 Earnings Report")
+    document_text: Optional[str] = Field(None, example="The company saw a 20% YoY increase...")
+    section: str = Field("General", example="Financials")
+    file_bytes: Optional[bytes] = Field(None, description="Raw bytes of an uploaded file (Image/PDF)")
+    mime_type: Optional[str] = Field("text/plain", description="MIME type of the uploaded file")

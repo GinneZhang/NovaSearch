@@ -36,7 +36,7 @@ Our pipeline is designed for extreme reliability, logical reasoning, and factual
 | **Vector Models** | BGE, E5, Contriever, OpenAI Embedding |
 | **Databases** | PostgreSQL + PGVector, Redis, Neo4j |
 | **Frameworks** | FastAPI, LlamaIndex, LangChain |
-| **Infrastructure** | Docker Compose (Local), Kubernetes (Production) |
+| **Infrastructure** | Docker Compose (Local & Production Ready) |
 
 ## 📁 Project Structure
 

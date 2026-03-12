@@ -155,8 +155,12 @@ class HybridSearchCoordinator:
                 MATCH (d:Document {id: $doc_id})-[:HAS_CHUNK]->(c:Chunk {index: $idx})
                 OPTIONAL MATCH (d)-[:HAS_CHUNK]->(prev:Chunk {index: $idx - 1})
                 OPTIONAL MATCH (d)-[:HAS_CHUNK]->(next:Chunk {index: $idx + 1})
-                OPTIONAL MATCH (c)-[:MENTIONS]->(e:Entity)<-[:MENTIONS]-(cross:Chunk)
-                WHERE e.name IN $entities AND cross.id <> c.id
+                
+                // 2-Hop Entity Traversal: Find entities mentioned in this chunk, 
+                // and then find OTHER chunks (in other docs) that mention the exact same entities.
+                OPTIONAL MATCH (c)-[:MENTIONS]->(e:Entity)<-[:MENTIONS]-(cross_c:Chunk)<-[:HAS_CHUNK]-(cross_d:Document)
+                WHERE e.name IN $entities AND cross_c.id <> c.id AND cross_d.id <> d.id
+                
                 RETURN 
                     d.title AS doc_title,
                     d.section AS doc_section,
@@ -164,7 +168,7 @@ class HybridSearchCoordinator:
                     prev.chunk_text AS prev_context,
                     next.chunk_text AS next_context,
                     collect(DISTINCT e.name) AS shared_entities,
-                    collect(DISTINCT cross.chunk_text)[0..2] AS cross_document_texts
+                    collect(DISTINCT cross_d.title + ": " + cross_c.chunk_text)[0..3] AS cross_document_texts
                 """
                 
                 try:

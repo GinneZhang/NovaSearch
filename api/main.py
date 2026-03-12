@@ -7,7 +7,7 @@ import uuid
 import logging
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import json
@@ -28,6 +28,7 @@ from core.auth import get_api_key
 from ingestion.chunking.semantic_chunker import SemanticChunker
 from ingestion.chunking.sliding_window import SlidingWindowChunker
 from ingestion.graph_build.kg_builder import KGBuilder
+from ingestion.parsers.multimodal_parser import MultimodalParser
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -70,11 +71,13 @@ try:
         logger.info("Using SemanticChunker")
         
     kg_builder = KGBuilder()
+    multimodal_parser = MultimodalParser()
 except Exception as e:
     logger.error("Failed to initialize tools: %s", str(e))
     copilot_agent = None
     chunker = None
     kg_builder = None
+    multimodal_parser = None
 
 
 @app.get("/health")
@@ -204,6 +207,8 @@ def ingest_document(request: DocumentUploadRequest):
                     chunker = SemanticChunker()
             if not kg_builder:
                 kg_builder = KGBuilder()
+            if not multimodal_parser:
+                multimodal_parser = MultimodalParser()
         except Exception as e:
             logger.error(f"Error details: {str(e)}")
             raise HTTPException(status_code=503, detail="Ingestion services unavailable.")
@@ -215,10 +220,22 @@ def ingest_document(request: DocumentUploadRequest):
         "section": request.section
     }
     
+    
     try:
+        # Extract Text from Uploaded File if provided, otherwise use raw text
+        if request.file_bytes:
+            logger.info("Parsing uploaded file: %s (MIME: %s)", request.title, request.mime_type)
+            document_text = multimodal_parser.parse(request.file_bytes, request.mime_type)
+            if not document_text:
+                raise ValueError("Parsed file yielded no text.")
+        else:
+            document_text = request.document_text
+            if not document_text:
+                raise ValueError("No document text or file provided.")
+                
         # 1. Chunk Document (Heavy CPU)
         logger.info("Chunking document: %s", request.title)
-        chunks = chunker.chunk_document(request.document_text, metadata)
+        chunks = chunker.chunk_document(document_text, metadata)
         
         # Ensure sequence_index is present for graph and db
         for idx, c in enumerate(chunks):
