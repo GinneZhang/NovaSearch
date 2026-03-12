@@ -3,7 +3,7 @@
 **[English](release_notes_v1.0.0.md) | [中文文档](release_notes_v1.0.0_cn.md)**
 
 **Release Date**: 2026-03-12
-**Commit**: `release(v1.0.0): terminal alignment, bilingual docs, and warmup engine`
+**Commit**: `feat(prod): phase 14 terminal deterministic reasoning and 6-doc bilingual sync`
 
 ---
 
@@ -92,6 +92,15 @@ The core of NovaSearch is the "Tri-Engine Fusion" architecture combining LLM sem
 
 ---
 
+## 🔒 Phase 14: Sovereign Runtime
+
+- **Hardened Ontology Alignment**: `OntologyManager` maps triplet terms to canonical schema via embedding similarity (threshold > 0.9). Unmapped terms trigger Clarification instead of guessing.
+- **Symbolic Proof Engine**: `SymbolicValidator` with two-layer verification — structural pre-check + GPT-4 Turbo proof layer. Hard-blocks answers that contradict Knowledge Graph facts (score < 1.0). Fail-closed on errors.
+- **OpenTelemetry / Jaeger Integration**: Cross-service `trace_id` propagation via `core/tracing.py`. Jaeger + OTLP exporters with FastAPI auto-instrumentation and `@traced` decorator.
+- **Enterprise Ops**: Helm chart with External Secrets Operator (AWS Secrets Manager), Velero backup annotations (daily 2AM schedule), and tracing configuration.
+
+---
+
 ## 📊 Test Results
 
 ```
@@ -114,7 +123,7 @@ The core of NovaSearch is the "Tri-Engine Fusion" architecture combining LLM sem
 | :--- | :--- |
 | PEFT / LoRA fine-tuning | Planned |
 | BGE / Contriever embeddings | Planned |
-| Distributed tracing (Jaeger/OTel) | Planned |
+| Distributed tracing (Jaeger/OTel) | **Active — core/tracing.py** |
 | Production Kubernetes | **Active — HPA + Helm** |
 
 ---

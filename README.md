@@ -34,6 +34,7 @@ Our objective is to deliver highly accurate, explainable, and hallucination-resi
 - **Cypher Linting & Validation**: Schema-aware validator rejects write operations and unknown labels before execution.
 - **Structured Cypher Objects**: `CypherResult` dataclass with nodes, edges, properties, and path existence validation.
 - **Symbolic Path Validator**: Checks label/rel existence against live schema before Cypher execution.
+- **Hardened Ontology Alignment**: `OntologyManager` maps triplet terms to canonical schema classes via embedding similarity at strict >0.9 confidence. Unmapped terms trigger Clarification.
 - **Dynamic Schema Introspection**: Live `CALL db.labels()` / `CALL db.relationshipTypes()` with property sampling.
 - **Self-Healing Cypher**: Error-feedback retry loop (max 2 retries) auto-repairs invalid Cypher.
 - **Factual Grounding**: KG constraints injected into generative context to suppress LLM hallucinations.
@@ -42,6 +43,7 @@ Our objective is to deliver highly accurate, explainable, and hallucination-resi
 
 - Source-grounded QA with mandatory origin tracing.
 - **Pre-Flight Hallucination Interceptor**: Two-stage buffered generation for high-stakes queries; ConsistencyEvaluator validates before streaming (threshold > 0.8).
+- **Symbolic Proof Engine**: `SymbolicValidator` verifies LLM answers against retrieved graph paths (A → REL → B). Contradictions trigger a hard block (score < 1.0).
 - Fail-closed `ConsistencyEvaluator` (GPT-4 Turbo) with hard timeout.
 - Iterative ReAct reasoning loop with clarification exhaustion.
 
@@ -49,6 +51,7 @@ Our objective is to deliver highly accurate, explainable, and hallucination-resi
 
 - `MetricsCollector` with per-engine latency tracking, error rates, and LLM-as-Judge scores.
 - `LatencyTimer` context manager for automatic operation timing.
+- **OpenTelemetry / Jaeger**: Cross-service `trace_id` propagation via `core/tracing.py`. Auto-instruments FastAPI with Jaeger and OTLP exporters.
 - RAGAS-inspired benchmark harness (Faithfulness, Answer Relevancy, Context Precision).
 - Concurrent load testing (10 threads) and failure injection resilience tests.
 
@@ -63,8 +66,8 @@ Our objective is to deliver highly accurate, explainable, and hallucination-resi
 | **Vector Models** | `all-MiniLM-L6-v2` (text), `clip-ViT-B-32` (vision) |
 | **Databases** | PostgreSQL + PGVector, Redis, Neo4j |
 | **Frameworks** | FastAPI, LangChain, LlamaIndex (long-context) |
-| **Observability** | `MetricsCollector` (per-engine latency, error rates, LLM scores) |
-| **Infrastructure** | K8s (HPA + Helm), Docker Compose |
+| **Observability** | `MetricsCollector`, OpenTelemetry, Jaeger |
+| **Infrastructure** | K8s (HPA + Helm + Velero + External Secrets), Docker Compose |
 
 ---
 
@@ -77,7 +80,7 @@ The following capabilities are **planned but not yet implemented**:
 | **PEFT / LoRA fine-tuning** | Planned |
 | **BGE / Contriever / E5 embeddings** | Planned |
 | **Claude 3 / Anthropic integration** | Planned |
-| **Distributed tracing (Jaeger/OTel)** | Planned |
+| **Distributed tracing (Jaeger/OTel)** | **Active — core/tracing.py** |
 | **Production Kubernetes** | **Active — HPA + Helm** |
 
 ---

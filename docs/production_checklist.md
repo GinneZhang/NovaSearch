@@ -123,5 +123,33 @@ python tests/load_test.py
 
 ---
 
-**Version**: v1.0.0 (Phase 13 hardened)
+## 11. Ontology Alignment (Phase 14)
+
+- [ ] `OntologyManager` loads canonical labels, rels, and properties from Neo4j
+- [ ] Embedding index built for schema terms (`all-MiniLM-L6-v2`)
+- [ ] Unmapped triplet terms (confidence < 0.9) trigger Clarification response
+- [ ] `ONTOLOGY_CONFIDENCE_THRESHOLD` env var set (default: 0.9)
+
+---
+
+## 12. Symbolic Proof Engine (Phase 14)
+
+- [ ] `SymbolicValidator` structural pre-check operational
+- [ ] GPT-4 Turbo proof layer validates answers against graph facts
+- [ ] Contradictions (score < 1.0) trigger hard block
+- [ ] Fail-closed on proof engine errors
+
+---
+
+## 13. OpenTelemetry / Jaeger (Phase 14)
+
+- [ ] `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_JAEGER_ENDPOINT` configured
+- [ ] `core/tracing.py` initialized at application startup
+- [ ] FastAPI auto-instrumented with `FastAPIInstrumentor`
+- [ ] Cross-service `trace_id` propagation verified in logs
+- [ ] Jaeger UI accessible for trace visualization
+
+---
+
+**Version**: v1.0.0 (Phase 14 — Sovereign Runtime)
 **Date**: 2026-03-12

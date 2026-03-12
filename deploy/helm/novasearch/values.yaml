@@ -1,5 +1,4 @@
 # NovaSearch Helm Values — Default Configuration
-# 默认 Helm 配置
 
 replicaCount:
   api: 2
@@ -63,6 +62,46 @@ probes:
     periodSeconds: 10
     failureThreshold: 3
 
+# --- External Secrets Operator (Phase 14) ---
+externalSecrets:
+  enabled: true
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secrets-manager
+    kind: ClusterSecretStore
+  remoteRefs:
+    - key: novasearch/openai-api-key
+      property: OPENAI_API_KEY
+    - key: novasearch/postgres-password
+      property: POSTGRES_PASSWORD
+    - key: novasearch/neo4j-password
+      property: NEO4J_PASSWORD
+
+# --- Velero Backup Annotations (Phase 14) ---
+velero:
+  enabled: true
+  annotations:
+    backup.velero.io/backup-volumes: "data"
+    pre.hook.backup.velero.io/command: '["/bin/sh", "-c", "pg_dump -U $POSTGRES_USER $POSTGRES_DB > /backup/pre-backup.sql"]'
+    pre.hook.backup.velero.io/container: postgresql
+  schedule:
+    name: novasearch-daily
+    schedule: "0 2 * * *"
+    ttl: 168h0m0s
+    includedNamespaces:
+      - novasearch
+
+# --- OpenTelemetry / Jaeger (Phase 14) ---
+tracing:
+  enabled: true
+  exporter: otlp  # 'jaeger' or 'otlp'
+  jaeger:
+    agentHost: jaeger-agent
+    agentPort: 6831
+  otlp:
+    endpoint: http://otel-collector:4317
+    insecure: true
+
 env:
   OPENAI_API_KEY: ""
   POSTGRES_HOST: postgresql
@@ -78,3 +117,6 @@ env:
   API_ENV: production
   LOG_LEVEL: WARNING
   PREFLIGHT_MODE: auto
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_EXPORTER_JAEGER_ENDPOINT: ""
+  ONTOLOGY_CONFIDENCE_THRESHOLD: "0.9"

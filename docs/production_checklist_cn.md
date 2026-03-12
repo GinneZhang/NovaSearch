@@ -123,5 +123,33 @@ python tests/load_test.py
 
 ---
 
-**版本**: v1.0.0（第 13 阶段加固）
+## 11. 本体对齐（阶段 14）
+
+- [ ] `OntologyManager` 从 Neo4j 加载规范标签、关系和属性
+- [ ] 为 Schema 术语构建嵌入索引（`all-MiniLM-L6-v2`）
+- [ ] 未映射的三元组术语（置信度 < 0.9）触发澄清响应
+- [ ] `ONTOLOGY_CONFIDENCE_THRESHOLD` 环境变量已设置（默认：0.9）
+
+---
+
+## 12. 符号证明引擎（阶段 14）
+
+- [ ] `SymbolicValidator` 结构预检查运行正常
+- [ ] GPT-4 Turbo 证明层验证答案是否符合图谱事实
+- [ ] 矛盾（分数 < 1.0）触发硬阻断
+- [ ] 证明引擎错误时采用失败封锁模式
+
+---
+
+## 13. OpenTelemetry / Jaeger（阶段 14）
+
+- [ ] `OTEL_EXPORTER_OTLP_ENDPOINT` 或 `OTEL_EXPORTER_JAEGER_ENDPOINT` 已配置
+- [ ] `core/tracing.py` 在应用启动时初始化
+- [ ] FastAPI 已通过 `FastAPIInstrumentor` 自动集成
+- [ ] 跨服务 `trace_id` 传播已在日志中验证
+- [ ] Jaeger UI 可访问用于追踪可视化
+
+---
+
+**版本**: v1.0.0（阶段 14 — 主权运行时）
 **日期**: 2026-03-12
