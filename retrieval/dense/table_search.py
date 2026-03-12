@@ -3,10 +3,12 @@ Table-Specific Retrieval Path for NovaSearch.
 
 Provides a dedicated search path for structured table data,
 prioritizing chunks with table metadata and applying table-aware
-reranking logic.
+reranking logic. Includes deep table embedding via Schema Summary
+headers and structured LLM extraction routing.
 """
 
 import os
+import json
 import logging
 from typing import List, Dict, Any, Optional
 
@@ -22,12 +24,22 @@ try:
 except ImportError:
     SentenceTransformer = None
 
+try:
+    import openai
+except ImportError:
+    openai = None
+
 
 class TableRetriever:
     """
     Dedicated retrieval path for table chunks.
     Filters on metadata.type == 'table' and applies table-aware
     scoring that treats Markdown structure as structured data.
+    
+    Features:
+        - Schema Summary embedding headers for deep table vectors
+        - Structured LLM extraction for table-related queries
+        - Table-query heuristic routing
     """
     
     TABLE_QUERY_INDICATORS = [
@@ -39,6 +51,7 @@ class TableRetriever:
     def __init__(self):
         self.model = None
         self.conn = None
+        self.llm_client = None
         
         if SentenceTransformer:
             try:
@@ -57,6 +70,14 @@ class TableRetriever:
             logger.info("TableRetriever: Connected to PostgreSQL")
         except Exception as e:
             logger.warning(f"TableRetriever: No PostgreSQL connection: {e}")
+        
+        # Initialize OpenAI client for structured extraction
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key and openai:
+            try:
+                self.llm_client = openai.OpenAI(api_key=api_key)
+            except Exception:
+                pass
     
     @staticmethod
     def is_table_query(query: str) -> bool:
@@ -133,38 +154,86 @@ class TableRetriever:
         return hits
     
     @staticmethod
-    def generate_table_embedding_text(markdown_table: str, title: str = "") -> str:
+    def generate_schema_summary(markdown_table: str, title: str = "") -> str:
         """
-        Generate a specialized embedding representation for a Markdown table.
+        Generate a Schema Summary header for embedding alongside the table.
         
-        Instead of embedding raw Markdown, creates a 'Table Summary + Column Description'
-        header that preserves structural intent for the embedding model.
-        
-        Example output:
-            "Table: Revenue by Quarter. Columns: Quarter, Revenue ($M), Growth (%).
-             Row 1: Q1 2024, 142.5, 12.3%. Row 2: Q2 2024, 156.8, 10.0%."
+        Analyzes column headers and infers types from data to produce a
+        structured summary: 'Table: [title]. Schema: col1(type), col2(type).'
+        This is embedded alongside the raw Markdown for richer retrieval.
         """
         lines = [l.strip() for l in markdown_table.strip().split("\n") if l.strip()]
         
         if not lines:
             return markdown_table
         
-        # Extract column headers (first row of Markdown table)
+        # Extract column headers
         header_line = lines[0]
         columns = [col.strip() for col in header_line.split("|") if col.strip()]
         
-        # Skip separator line (e.g., |---|---|)
+        # Skip separator line and get data lines
+        data_lines = [l for l in lines[1:] if not all(c in "-| " for c in l)]
+        
+        # Infer column types from first data row
+        col_types = []
+        if data_lines:
+            first_row = [c.strip() for c in data_lines[0].split("|") if c.strip()]
+            for i, col in enumerate(columns):
+                cell = first_row[i] if i < len(first_row) else ""
+                # Type heuristic
+                cell_clean = cell.replace(",", "").replace("$", "").replace("%", "").strip()
+                try:
+                    float(cell_clean)
+                    col_type = "numeric"
+                except ValueError:
+                    if any(c.isdigit() for c in cell) and "/" in cell or "-" in cell:
+                        col_type = "date"
+                    else:
+                        col_type = "text"
+                col_types.append(f"{col}({col_type})")
+        else:
+            col_types = [f"{col}(unknown)" for col in columns]
+        
+        # Build Schema Summary
+        parts = []
+        if title:
+            parts.append(f"Table: {title}.")
+        parts.append(f"Schema: {', '.join(col_types)}.")
+        parts.append(f"Rows: {len(data_lines)}.")
+        
+        return " ".join(parts)
+    
+    @staticmethod
+    def generate_table_embedding_text(markdown_table: str, title: str = "") -> str:
+        """
+        Generate a specialized embedding representation for a Markdown table.
+        
+        Creates a 'Table Summary + Column Description' header that preserves
+        structural intent for the embedding model, appended with the Schema Summary.
+        """
+        lines = [l.strip() for l in markdown_table.strip().split("\n") if l.strip()]
+        
+        if not lines:
+            return markdown_table
+        
+        # Extract column headers
+        header_line = lines[0]
+        columns = [col.strip() for col in header_line.split("|") if col.strip()]
+        
+        # Skip separator line
         data_lines = [l for l in lines[1:] if not all(c in "-| " for c in l)]
         
         # Build semantic representation
         parts = []
-        if title:
-            parts.append(f"Table: {title}.")
+        
+        # Add Schema Summary header
+        schema_summary = TableRetriever.generate_schema_summary(markdown_table, title)
+        parts.append(schema_summary)
         
         if columns:
             parts.append(f"Columns: {', '.join(columns)}.")
         
-        for i, row_line in enumerate(data_lines[:10]):  # Cap at 10 rows for embedding
+        for i, row_line in enumerate(data_lines[:10]):  # Cap at 10 rows
             cells = [c.strip() for c in row_line.split("|") if c.strip()]
             if cells:
                 parts.append(f"Row {i+1}: {', '.join(cells)}.")
@@ -176,8 +245,6 @@ class TableRetriever:
         """
         Extract structured key-value pairs from a Markdown table
         for exact value matching in queries.
-        
-        Returns a list of dicts representing each row with column headers as keys.
         """
         lines = [l.strip() for l in markdown_table.strip().split("\n") if l.strip()]
         
@@ -187,14 +254,62 @@ class TableRetriever:
         # Parse header
         headers = [col.strip() for col in lines[0].split("|") if col.strip()]
         
-        # Parse data rows (skip separator line)
+        # Parse data rows
         rows = []
         for line in lines[1:]:
             if all(c in "-| " for c in line):
-                continue  # Skip separator
+                continue
             cells = [c.strip() for c in line.split("|") if c.strip()]
             if cells and len(cells) == len(headers):
                 rows.append(dict(zip(headers, cells)))
         
         return rows
+    
+    def extract_structured_answer(self, query: str, table_chunks: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """
+        Structured LLM extraction: for table-related queries, uses the LLM
+        to extract specific row/column values from table chunks instead
+        of relying on simple vector similarity.
+        
+        Returns a structured JSON response with extracted values.
+        """
+        if not self.llm_client or not table_chunks:
+            return None
+        
+        # Concatenate table content
+        table_context = "\n\n".join([
+            chunk.get("chunk_text", "") for chunk in table_chunks[:5]
+        ])
+        
+        prompt = f"""You are a precise data extraction agent. The user is asking about structured table data.
 
+Extract the specific values requested from the following table context.
+
+<Table Context>
+{table_context}
+</Table Context>
+
+User Query: {query}
+
+Instructions:
+1. Extract ONLY the specific values the user asked about.
+2. Return a structured JSON response with:
+   - "answer": A natural language answer to the query
+   - "extracted_values": A list of key-value pairs from the table
+   - "source_table": Which table the data came from (if identifiable)
+3. If the data is not in the tables, respond with {{"answer": "Data not found in provided tables", "extracted_values": [], "source_table": null}}
+
+Respond with valid JSON only."""
+
+        try:
+            response = self.llm_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                response_format={"type": "json_object"}
+            )
+            content = response.choices[0].message.content
+            return json.loads(content)
+        except Exception as e:
+            logger.error(f"Table structured extraction failed: {e}")
+            return None

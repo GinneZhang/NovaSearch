@@ -373,50 +373,99 @@ If the user greets you or asks about your capabilities, you may respond naturall
         )
         messages.append({"role": "user", "content": final_user_content})
         
+        # --- TWO-STAGE PRE-FLIGHT HALLUCINATION INTERCEPTOR ---
+        # For high-stakes queries, buffer the full response, validate with
+        # ConsistencyEvaluator, and only release if score > 0.8.
+        high_stakes = os.getenv("PREFLIGHT_MODE", "auto").lower()
+        use_preflight = (high_stakes == "always") or (
+            high_stakes == "auto" and intent == "SEARCH"
+            and any(kw in query.lower() for kw in [
+                "compliance", "legal", "regulation", "policy", "violation",
+                "penalty", "risk", "audit", "sec", "gdpr", "hipaa"
+            ])
+        )
+        
         try:
-            final_answer = ""
-            if self.model_provider == "anthropic":
-                logger.info("Executing Anthropic generation (Model: %s) with stream=True...", self.model)
-                system_prompt = self._build_system_prompt()
-                anthropic_messages = [{"role": m["role"], "content": m["content"]} for m in messages[1:]]
-                
-                with self.client.messages.stream(
-                    model=self.model,
-                    system=system_prompt,
-                    messages=anthropic_messages,
-                    max_tokens=1024,
-                    temperature=0.0
-                ) as stream:
-                    for text in stream.text_stream:
-                        final_answer += text
-                        yield {"type": "token", "content": text}
-            else:
-                logger.info("Executing OpenAI generation (Model: %s) with stream=True...", self.model)
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages, # type: ignore
-                    temperature=0.0,
-                    max_tokens=1024,
-                    stream=True
-                )
-                
-                for chunk in response:
-                    if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
-                         continue
-                    delta = chunk.choices[0].delta
-                    if getattr(delta, "content", None):
-                        token = delta.content
-                        final_answer += token
-                        yield {"type": "token", "content": token}
-            
-            # 6. Save new turn to Semantic Memory asynchronously (Threadpool handled by FastAPI)
-            self.memory.add_message(sid, "user", query)
-            self.memory.add_message(sid, "assistant", final_answer)
-            
-            # Run Real-time Consistency Evaluation
             from agent.consistency import ConsistencyEvaluator
             evaluator = ConsistencyEvaluator(self.openai_client)
-            eval_result = evaluator.evaluate(final_answer, context_str)
+            
+            if use_preflight:
+                yield {"type": "thought", "content": "High-stakes query detected. Activating pre-flight validation (buffered mode)..."}
+                
+                # Stage 1: Generate full response into buffer (no streaming)
+                buffered_answer = self._generate_buffered(messages)
+                
+                # Stage 2: Pre-flight consistency check
+                eval_result = evaluator.evaluate(buffered_answer, context_str)
+                preflight_score = eval_result.get("consistency_score", 0.0)
+                
+                if preflight_score > 0.8:
+                    yield {"type": "thought", "content": f"Pre-flight validation passed (score: {preflight_score:.2f}). Releasing response."}
+                    # Release buffered tokens
+                    for token in buffered_answer.split(" "):
+                        yield {"type": "token", "content": token + " "}
+                    final_answer = buffered_answer
+                else:
+                    yield {"type": "thought", "content": f"Pre-flight validation FAILED (score: {preflight_score:.2f}). Blocking response."}
+                    safety_msg = (
+                        "⚠️ Safety Block: The generated response did not pass the pre-flight "
+                        "consistency check against the source documents. The answer may contain "
+                        "ungrounded claims. Please refine your query or contact the compliance team "
+                        "for manual review."
+                    )
+                    yield {"type": "safety_block", "content": safety_msg}
+                    yield {
+                        "type": "answer_metadata",
+                        "sources": graph_expanded_hits,
+                        "session_id": sid,
+                        "consistency_score": preflight_score,
+                        "hallucination_warning": True,
+                        "preflight_blocked": True
+                    }
+                    return
+            else:
+                # Standard streaming path (non-high-stakes)
+                final_answer = ""
+                if self.model_provider == "anthropic":
+                    logger.info("Executing Anthropic generation (Model: %s) with stream=True...", self.model)
+                    system_prompt = self._build_system_prompt()
+                    anthropic_messages = [{"role": m["role"], "content": m["content"]} for m in messages[1:]]
+                    
+                    with self.client.messages.stream(
+                        model=self.model,
+                        system=system_prompt,
+                        messages=anthropic_messages,
+                        max_tokens=1024,
+                        temperature=0.0
+                    ) as stream:
+                        for text in stream.text_stream:
+                            final_answer += text
+                            yield {"type": "token", "content": text}
+                else:
+                    logger.info("Executing OpenAI generation (Model: %s) with stream=True...", self.model)
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages, # type: ignore
+                        temperature=0.0,
+                        max_tokens=1024,
+                        stream=True
+                    )
+                    
+                    for chunk in response:
+                        if not getattr(chunk, "choices", None) or len(chunk.choices) == 0:
+                             continue
+                        delta = chunk.choices[0].delta
+                        if getattr(delta, "content", None):
+                            token = delta.content
+                            final_answer += token
+                            yield {"type": "token", "content": token}
+                
+                # Post-stream consistency evaluation
+                eval_result = evaluator.evaluate(final_answer, context_str)
+            
+            # Save new turn to Semantic Memory
+            self.memory.add_message(sid, "user", query)
+            self.memory.add_message(sid, "assistant", final_answer)
             
             yield {
                 "type": "answer_metadata",
@@ -428,3 +477,33 @@ If the user greets you or asks about your capabilities, you may respond naturall
         except Exception as e:
             logger.error("LLM Generation failed: %s", str(e))
             yield {"type": "error", "content": f"Error during response generation: {str(e)}"}
+    
+    def _generate_buffered(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Generate a complete LLM response into a buffer (no streaming).
+        Used by the pre-flight hallucination interceptor.
+        """
+        try:
+            if self.model_provider == "anthropic":
+                system_prompt = messages[0]["content"]
+                anthropic_messages = [{"role": m["role"], "content": m["content"]} for m in messages[1:]]
+                response = self.client.messages.create(
+                    model=self.model,
+                    system=system_prompt,
+                    messages=anthropic_messages,
+                    max_tokens=1024,
+                    temperature=0.0
+                )
+                return response.content[0].text.strip()
+            else:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages, # type: ignore
+                    temperature=0.0,
+                    max_tokens=1024,
+                    stream=False
+                )
+                return response.choices[0].message.content.strip() # type: ignore
+        except Exception as e:
+            logger.error("Buffered generation failed: %s", str(e))
+            return ""
