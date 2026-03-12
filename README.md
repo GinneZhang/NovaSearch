@@ -8,25 +8,32 @@ Our objective is to deliver highly accurate, explainable, and hallucination-resi
 
 1. **Query Understanding & Context Memory**
    - **Structuring**: LLM-driven query rewriting, intent recognition, and structured semantic graph generation (triplet extraction).
-   - **Decomposition**: Multi-hop task breakdown and proactive clarification prompting for ambiguous queries.
+   - **Decomposition**: Multi-hop task breakdown via `DependencyGraph` with Plan-and-Execute sub-task tracking.
+   - **Clarification**: Stateful clarification loop persisted across API calls via Redis `StateManager`.
    - **Context**: Semantic cross-session thread linking and memory state management via Redis + SentenceTransformers.
 
 2. **Hybrid Multimodal Retrieval**
    - **Tri-Retrieval Fusion**: Integrating Sparse (PostgreSQL FTS / Elasticsearch), Dense (PGVector with `all-MiniLM-L6-v2`), Multimodal Vision (OpenAI CLIP `clip-ViT-B-32`) and Structural (Neo4j Cypher Graph Traversal) pathways.
-   - **Table-Aware Parsing**: PDF and DOCX table extraction via pdfplumber and python-docx, formatted as Markdown grids for structural preservation in the vector space.
-   - **Cross-Modal Search**: The `/ask_vision` endpoint allows users to upload images to retrieve semantically related text chunks.
+   - **Table-Specific Retrieval**: Dedicated `TableRetriever` filtering on `metadata.type == 'table'` chunks with table-aware reranking.
+   - **Table-Aware Parsing**: PDF and DOCX table extraction via pdfplumber and python-docx, formatted as Markdown grids.
+   - **Cross-Modal Search**: The `/ask_vision` endpoint maps images to the shared CLIP vector space for retrieval.
    - **Advanced Chunking**: Sliding Window + Embedding Clustering to preserve semantic context boundaries.
-   - **Reranking**: Cross-Encoder reranking (`cross-encoder/ms-marco-MiniLM-L-6-v2`), with pluggable support for ColBERT and MonoT5.
+   - **Reranking**: Cross-Encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`), with pluggable ColBERT and MonoT5.
 
 3. **Knowledge Graph Reasoning (KG)**
-   - **Disambiguation**: spaCy NER mapping queries to graph nodes.
-   - **Dynamic Cypher**: Text-to-Cypher generation via LLM with self-healing retry loop (error-feedback repair).
+   - **Vector Entity Linking**: Embedding similarity search against Neo4j Entity nodes for precision disambiguation.
+   - **Dynamic Schema Introspection**: `CypherGenerator` fetches live schema via `CALL db.labels()` / `CALL db.relationshipTypes()` before generating queries.
+   - **Self-Healing Cypher**: Error-feedback retry loop (max 2 retries) auto-repairs invalid Cypher.
    - **Factual Grounding**: KG constraints injected into generative context to suppress LLM hallucinations.
 
 4. **Controlled LLM Generation**
    - Source-grounded QA with mandatory origin tracing for all outputs.
    - Real-time consistency scoring via fail-closed `ConsistencyEvaluator` (GPT-4 Turbo).
    - Iterative ReAct reasoning loop with clarification exhaustion.
+
+5. **Quantitative Evaluation**
+   - RAGAS-inspired benchmark harness measuring Faithfulness, Answer Relevancy, and Context Precision.
+   - Concurrent load testing (10 threads) for latency and throughput measurement.
 
 ## 🛠 Current Tech Stack
 
@@ -61,12 +68,13 @@ The following capabilities are **planned but not yet implemented**:
 │   ├── chunking/         # Embedding clustering & metadata injection logic
 │   └── graph_build/      # NER, Entity linking, Neo4j population
 ├── retrieval/            # Hybrid search coordinators
-│   ├── dense/            # Vector DB interfaces (PGVector/FAISS)
-│   ├── sparse/           # Keyword indexing
-│   └── reranker/         # ColBERT/MonoT5 integration
-├── agent/                # LLM reasoning loops, tool-use, CoT clarification
-├── tests/                # Unit/Integration test suites
-├── docker-compose.yml    # Local Core Infra (Postgres, Redis, Neo4j)
+│   ├── dense/            # Vector DB interfaces (PGVector, FAISS, TableRetriever)
+│   ├── sparse/           # Keyword indexing (PostgreSQL FTS, Elasticsearch)
+│   ├── reranker/         # ColBERT, MonoT5, Cross-Encoder
+│   └── graph/            # CypherGenerator (self-healing), EntityLinker (vector-based)
+├── agent/                # LLM reasoning loops, State Machine, Query Parser
+├── tests/                # Unit/Integration/Benchmark test suites
+├── docker-compose.yml    # Local Core Infra (Postgres, Redis, Neo4j, Elasticsearch)
 ├── requirements.txt      # Dependencies
 └── api/main.py           # Application entry point
 ```
