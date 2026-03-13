@@ -128,6 +128,7 @@ def ask_copilot(request: QueryRequest):
                     for s in chunk.get("sources", []):
                         sources_schema.append({
                             "doc_id": s.get("doc_id", "unknown"),
+                            "title": s.get("title") or s.get("graph_context", {}).get("doc_title"),
                             "chunk_text": s.get("chunk_text", ""),
                             "score": s.get("cross_encoder_score", s.get("score", 0.0)),
                             "graph_context": s.get("graph_context")

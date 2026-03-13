@@ -46,7 +46,15 @@ class CrossEncoderReranker(BaseReranker):
         logger.info("Cross-Encoder rescoring %d candidate hits...", len(hits))
         
         # Prepare pairs: (Query, Document Text)
-        pairs = [[query, hit.get("chunk_text", "")] for hit in hits]
+        pairs = []
+        for hit in hits:
+            title = (hit.get("title") or "").strip()
+            chunk_text = hit.get("chunk_text", "")
+            if title:
+                doc_text = f"{title}\n{chunk_text}"
+            else:
+                doc_text = chunk_text
+            pairs.append([query, doc_text])
         
         try:
             # Predict scores

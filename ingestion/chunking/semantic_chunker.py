@@ -8,6 +8,7 @@ into the text to maintain context.
 """
 
 import logging
+import re
 from typing import List, Dict, Any
 import numpy as np
 
@@ -62,10 +63,8 @@ class SemanticChunker:
         try:
             self.nlp = spacy.load("en_core_web_sm")
         except OSError:
-            logger.info("Downloading spaCy en_core_web_sm model...")
-            import subprocess
-            subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True)
-            self.nlp = spacy.load("en_core_web_sm")
+            logger.warning("spaCy en_core_web_sm unavailable. Falling back to regex sentence splitting.")
+            self.nlp = None
 
         # Load embedding model
         logger.info("Loading embedding model: %s", embedding_model_name)
@@ -73,8 +72,10 @@ class SemanticChunker:
 
     def _get_atomic_sentences(self, text: str) -> List[str]:
         """Splits raw text into atomic sentences using spaCy."""
-        doc = self.nlp(text)
-        return [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+        if self.nlp:
+            doc = self.nlp(text)
+            return [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+        return [sent.strip() for sent in re.split(r"(?<=[.!?])\s+", text) if sent.strip()]
 
     def _get_embeddings(self, sentences: List[str]) -> np.ndarray:
         """Generates embeddings for a list of sentences."""

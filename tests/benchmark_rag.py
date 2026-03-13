@@ -9,7 +9,7 @@ import json
 import logging
 import time
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import httpx
 
 from datasets import load_dataset
@@ -26,6 +26,16 @@ try:
     import openai
 except ImportError:
     openai = None
+
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+
+try:
+    from neo4j import GraphDatabase
+except ImportError:
+    GraphDatabase = None
 
 
 def calc_mrr_at_k(retrieved_contexts: List[str], expected_titles: List[str], k: int = 5) -> float:
@@ -96,6 +106,78 @@ async def ingest_document(client, base_url, headers, doc_text, idx, semaphore, p
             pbar.update(1)
 
 
+async def ingest_page_document(client, base_url, headers, title, doc_text, idx, semaphore, pbar, error_list):
+    """Async task to ingest a single source page with its original title preserved."""
+    async with semaphore:
+        try:
+            resp = await client.post(
+                f"{base_url}/ingest",
+                data={"text_input": doc_text, "title": title, "section": f"HotpotQA Benchmark {idx}"},
+                headers=headers
+            )
+            if resp.status_code != 200:
+                error_list.append(f"Title '{title}' Failed: Code {resp.status_code}")
+        except Exception as e:
+            error_list.append(f"Title '{title}' Error: {str(e)}")
+        finally:
+            pbar.update(1)
+
+
+def _compose_retrieval_context(source: Dict[str, Any]) -> str:
+    title = source.get("title") or source.get("graph_context", {}).get("doc_title") or ""
+    chunk_text = source.get("chunk_text", "") or ""
+    graph_title = source.get("graph_context", {}).get("doc_title") or ""
+    parts = [part for part in [title, graph_title, chunk_text] if part]
+    return "\n".join(parts)
+
+
+def reset_benchmark_stores():
+    """Best-effort cleanup so repeated benchmark runs don't stack stale state."""
+    pg_dsn = os.getenv(
+        "DATABASE_URL",
+        f"dbname={os.getenv('POSTGRES_DB', 'novasearch')} "
+        f"user={os.getenv('POSTGRES_USER', 'postgres')} "
+        f"password={os.getenv('POSTGRES_PASSWORD', 'postgres_secure_password')} "
+        f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
+        f"port={os.getenv('POSTGRES_PORT', '5432')}"
+    )
+
+    if psycopg2:
+        conn = None
+        try:
+            conn = psycopg2.connect(pg_dsn)
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE TABLE vision_embeddings RESTART IDENTITY CASCADE;")
+                cur.execute("TRUNCATE TABLE chunks RESTART IDENTITY CASCADE;")
+                cur.execute("TRUNCATE TABLE documents RESTART IDENTITY CASCADE;")
+            print("Reset PostgreSQL benchmark tables.")
+        except Exception as exc:
+            print(f"Warning: PostgreSQL reset skipped: {exc}")
+        finally:
+            if conn:
+                conn.close()
+
+    if GraphDatabase:
+        driver = None
+        try:
+            driver = GraphDatabase.driver(
+                os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+                auth=(
+                    os.getenv("NEO4J_USER", "neo4j"),
+                    os.getenv("NEO4J_PASSWORD", "neo4j_secure_password"),
+                ),
+            )
+            with driver.session() as session:
+                session.run("MATCH (n) DETACH DELETE n")
+            print("Reset Neo4j benchmark graph.")
+        except Exception as exc:
+            print(f"Warning: Neo4j reset skipped: {exc}")
+        finally:
+            if driver:
+                driver.close()
+
+
 async def evaluate_query(client, base_url, headers, case, idx, evaluator, semaphore, pbar, results):
     """Async task to evaluate a single query against the live API."""
     async with semaphore:
@@ -125,7 +207,7 @@ async def evaluate_query(client, base_url, headers, case, idx, evaluator, semaph
                             if data.get("type") == "token":
                                 answer += data.get("content", "")
                             elif data.get("type") == "answer_metadata":
-                                contexts = [s.get("chunk_text", "") for s in data.get("sources", [])]
+                                contexts = [_compose_retrieval_context(s) for s in data.get("sources", [])]
                         except: pass
             
             # Eval Retrieval
@@ -186,10 +268,12 @@ async def main_async():
     print("Loading HotpotQA dataset from Hugging Face...")
     ds = load_dataset("hotpot_qa", "distractor", split="validation", streaming=False)
     
-    SAMPLE_SIZE = 1000
+    SAMPLE_SIZE = int(os.getenv("HOTPOT_SAMPLE_SIZE", "1000"))
+    RESET_STORES = os.getenv("HOTPOT_RESET_STORES", "true").lower() in {"1", "true", "yes"}
     subset = ds.shuffle(seed=42).select(range(SAMPLE_SIZE))
     
     qa_pairs = []
+    page_corpus: Dict[str, str] = {}
     total_raw_tokens = 0
     
     for idx, item in enumerate(subset):
@@ -200,9 +284,13 @@ async def main_async():
         titles = item['context']['title']
         sentences = item['context']['sentences']
         doc_text = ""
+        pages: List[Tuple[str, str]] = []
         for t_idx, title in enumerate(titles):
-            doc_text += f"{title}\n"
-            doc_text += "".join(sentences[t_idx]) + "\n\n"
+            page_text = " ".join(sentences[t_idx]).strip()
+            full_page_text = f"{title}\n{page_text}".strip()
+            doc_text += full_page_text + "\n\n"
+            pages.append((title, full_page_text))
+            page_corpus.setdefault(title, full_page_text)
         
         doc_text = doc_text.strip()
         total_raw_tokens += len(doc_text.split()) * 1.3
@@ -212,19 +300,25 @@ async def main_async():
             "query": query,
             "expected_answer": expected_answer,
             "expected_titles": expected_titles,
-            "doc_text": doc_text
+            "doc_text": doc_text,
+            "pages": pages,
         })
         
+    if RESET_STORES:
+        reset_benchmark_stores()
+
     # 2. Programmatic Async Ingestion
-    print(f"\nStarting ASYNC Ingestion of {SAMPLE_SIZE} Reference Documents...")
+    unique_pages = list(page_corpus.items())
+    print(f"\nStarting ASYNC Ingestion of {len(unique_pages)} unique reference pages...")
     error_list = []
-    ingest_semaphore = asyncio.Semaphore(10) # 10 Concurrent Docs to avoid breaking Neo4j/OpenAI limits
+    ingest_concurrency = int(os.getenv("HOTPOT_INGEST_CONCURRENCY", "3"))
+    ingest_semaphore = asyncio.Semaphore(ingest_concurrency)
     
     async with httpx.AsyncClient(timeout=120) as client:
-        with tqdm(total=SAMPLE_SIZE, desc="Ingesting Docs") as pbar:
+        with tqdm(total=len(unique_pages), desc="Ingesting Pages") as pbar:
             tasks = [
-                ingest_document(client, base_url, headers, case["doc_text"], case["idx"], ingest_semaphore, pbar, error_list)
-                for case in qa_pairs
+                ingest_page_document(client, base_url, headers, title, text, idx, ingest_semaphore, pbar, error_list)
+                for idx, (title, text) in enumerate(unique_pages)
             ]
             await asyncio.gather(*tasks)
             
@@ -239,7 +333,8 @@ async def main_async():
     # 3. Query Phase
     print(f"\nStarting ASYNC Query Evaluation Phase ({SAMPLE_SIZE} queries)...")
     evaluator = RAGEvaluator()
-    query_semaphore = asyncio.Semaphore(15)
+    query_concurrency = int(os.getenv("HOTPOT_QUERY_CONCURRENCY", "5"))
+    query_semaphore = asyncio.Semaphore(query_concurrency)
     query_results = []
     
     async with httpx.AsyncClient(timeout=120) as client:

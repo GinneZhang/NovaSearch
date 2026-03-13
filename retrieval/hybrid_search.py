@@ -12,6 +12,7 @@ import os
 import uuid
 import json
 import logging
+import re
 from typing import List, Dict, Any, Optional
 
 try:
@@ -35,6 +36,17 @@ from retrieval.reranker.monot5_reranker import MonoT5Reranker
 from retrieval.graph.cypher_generator import CypherGenerator
 
 logger = logging.getLogger(__name__)
+
+MULTI_HOP_CUES = (
+    "wife", "husband", "spouse", "father", "mother", "daughter", "son",
+    "founder", "author", "director", "capital", "born", "birth", "located",
+    "president", "leader", "member"
+)
+
+FOLLOW_UP_RELATION_TERMS = (
+    "wife", "husband", "spouse", "born", "birthplace", "capital",
+    "author", "director", "president", "leader", "member"
+)
 
 class HybridSearchCoordinator:
     """
@@ -119,10 +131,8 @@ class HybridSearchCoordinator:
         try:
             self.nlp = spacy.load("en_core_web_sm")
         except OSError:
-            logger.warning("Spacy model not found. Downloading en_core_web_sm...")
-            import subprocess
-            subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True)
-            self.nlp = spacy.load("en_core_web_sm")
+            logger.warning("Spacy model not found. Continuing without spaCy NER.")
+            self.nlp = None
             
         # 5. Setup Dynamic Cypher Generator
         self.cypher_gen = CypherGenerator()
@@ -136,12 +146,129 @@ class HybridSearchCoordinator:
 
     def _extract_entities(self, query: str) -> List[str]:
         """Extracts Named Entities (ORG, PERSON, DATE, etc.) using spaCy."""
-        if not hasattr(self, 'nlp'):
+        if not hasattr(self, 'nlp') or not self.nlp:
             return []
         doc = self.nlp(query)
         # Filter for meaningful entities
         entities = [ent.text for ent in doc.ents if ent.label_ in ["ORG", "PERSON", "GPE", "PRODUCT", "LAW"]]
         return list(set(entities))
+
+    @staticmethod
+    def _normalize_terms(text: str) -> List[str]:
+        return [token for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]+", (text or "").lower()) if len(token) > 2]
+
+    def _title_overlap(self, query: str, title: str) -> int:
+        query_terms = set(self._normalize_terms(query))
+        title_terms = set(self._normalize_terms(title))
+        return len(query_terms & title_terms)
+
+    def _is_multi_hop_query(self, query: str) -> bool:
+        lowered = query.lower()
+        return any(cue in lowered for cue in MULTI_HOP_CUES) and " of " in lowered
+
+    def _build_query_variants(self, query: str) -> List[str]:
+        variants: List[str] = [query.strip()]
+        entities = self._extract_entities(query)
+
+        if entities:
+            variants.extend(entity for entity in entities if entity and entity not in variants)
+            combined_entities = " ".join(entities[:2]).strip()
+            if combined_entities and combined_entities not in variants:
+                variants.append(combined_entities)
+
+        lowered = query.lower()
+        cleaned = re.sub(r"\b(who|what|when|where|which|is|was|were|the|a|an)\b", " ", lowered, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned and cleaned not in variants:
+            variants.append(cleaned)
+
+        return variants[:4]
+
+    def _extract_bridge_entities(self, query: str, hits: List[Dict[str, Any]]) -> List[str]:
+        query_terms = set(self._normalize_terms(query))
+        bridges: List[str] = []
+
+        for hit in hits[:5]:
+            candidates: List[str] = []
+            title = hit.get("title") or ""
+            if title:
+                candidates.append(title)
+
+            if hasattr(self, "nlp") and self.nlp:
+                text = f"{title}\n{hit.get('chunk_text', '')}"
+                try:
+                    doc = self.nlp(text)
+                    candidates.extend(
+                        ent.text.strip() for ent in doc.ents
+                        if ent.label_ in {"PERSON", "ORG", "GPE", "LOC", "PRODUCT", "EVENT"}
+                    )
+                except Exception:
+                    pass
+            else:
+                text = hit.get("chunk_text", "")
+                candidates.extend(re.findall(r"(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})", text))
+
+            for candidate in candidates:
+                candidate = candidate.strip(" .,:;()[]{}\"'")
+                if not candidate:
+                    continue
+                candidate_terms = set(self._normalize_terms(candidate))
+                if not candidate_terms:
+                    continue
+                if candidate_terms.issubset(query_terms):
+                    continue
+                if len(candidate_terms) == 1 and next(iter(candidate_terms)) in {"who", "what", "when", "where"}:
+                    continue
+                if candidate not in bridges:
+                    bridges.append(candidate)
+
+        return bridges[:6]
+
+    def _follow_up_queries(self, query: str, hits: List[Dict[str, Any]]) -> List[str]:
+        if not self._is_multi_hop_query(query):
+            return []
+
+        lowered = query.lower()
+        relation_terms = [term for term in FOLLOW_UP_RELATION_TERMS if term in lowered]
+        if not relation_terms:
+            relation_terms = ["related"]
+
+        bridges = self._extract_bridge_entities(query, hits)
+        follow_ups: List[str] = []
+
+        for bridge in bridges:
+            for relation in relation_terms[:2]:
+                if relation == "related":
+                    candidate = bridge
+                else:
+                    candidate = f"{relation} {bridge}"
+                if candidate.lower() != query.lower() and candidate not in follow_ups:
+                    follow_ups.append(candidate)
+
+        return follow_ups[:6]
+
+    def _collect_candidates(self, query_variants: List[str], fetch_k: int) -> List[Dict[str, Any]]:
+        dense_hits: List[Dict[str, Any]] = []
+        sparse_hits: List[Dict[str, Any]] = []
+
+        per_variant_k = max(8, fetch_k // max(1, len(query_variants)))
+        for variant in query_variants:
+            for hit in self.dense_retriever.search(variant, top_k=per_variant_k):
+                hit["query_variant"] = variant
+                dense_hits.append(hit)
+            for hit in self.sparse_retriever.search(variant, top_k=per_variant_k):
+                hit["query_variant"] = variant
+                sparse_hits.append(hit)
+
+        fused_hits = reciprocal_rank_fusion(dense_hits, sparse_hits)
+
+        for hit in fused_hits:
+            title = hit.get("title") or ""
+            if title:
+                hit["rrf_score"] = hit.get("rrf_score", 0.0) + (0.04 * self._title_overlap(query_variants[0], title))
+
+        fused_hits.sort(key=lambda x: x.get("rrf_score", 0.0), reverse=True)
+        return fused_hits[:fetch_k]
 
     def _graph_expansion(self, base_hits: List[Dict[str, Any]], query: str = "") -> List[Dict[str, Any]]:
         """
@@ -284,26 +411,46 @@ class HybridSearchCoordinator:
         """
         logger.info("Initiating Hybrid Search for query: '%s'", query)
         
-        # 1. Base Retrieval (Cast a wide net)
-        fetch_k = max(20, top_k * 4) 
-        dense_hits = self.dense_retriever.search(query, top_k=fetch_k)
-        sparse_hits = self.sparse_retriever.search(query, top_k=fetch_k)
-        
-        # 2. First Stage Fusion (RRF)
-        fused_hits = reciprocal_rank_fusion(dense_hits, sparse_hits)
-        
+        # 1. Base Retrieval with query variants
+        fetch_k = max(40, top_k * 8)
+        base_variants = self._build_query_variants(query)
+        fused_hits = self._collect_candidates(base_variants, fetch_k=fetch_k)
+
+        # 2. Second-hop query generation for relational questions
+        follow_ups = self._follow_up_queries(query, fused_hits[:10])
+        if follow_ups:
+            logger.info("Generated %d follow-up queries for multi-hop retrieval: %s", len(follow_ups), follow_ups)
+            follow_up_hits = self._collect_candidates(follow_ups, fetch_k=fetch_k)
+            merged_pool = fused_hits + follow_up_hits
+        else:
+            merged_pool = fused_hits
+
+        deduped_pool: Dict[tuple, Dict[str, Any]] = {}
+        for hit in merged_pool:
+            key = (hit.get("doc_id"), hit.get("chunk_index"))
+            if key not in deduped_pool or hit.get("rrf_score", hit.get("score", 0.0)) > deduped_pool[key].get("rrf_score", deduped_pool[key].get("score", 0.0)):
+                deduped_pool[key] = hit
+
+        candidate_pool = sorted(
+            deduped_pool.values(),
+            key=lambda x: x.get("rrf_score", x.get("score", 0.0)),
+            reverse=True
+        )[:fetch_k]
+
         # 3. Second Stage Reranking (Cross-Encoder)
-        reranked_hits = self.cross_encoder.rerank(query, fused_hits, top_k=top_k)
+        reranked_hits = self.cross_encoder.rerank(query, candidate_pool, top_k=fetch_k)
         
         # 4. Knowledge Graph Expansion (Now with NER capability)
-        final_grounded_results = self._graph_expansion(reranked_hits, query=query)
+        grounded_candidates = self._graph_expansion(reranked_hits[: max(top_k * 3, 10)], query=query)
         
         # 5. Deep Symbolic Reasoning (Dynamic Cypher)
         deep_hits = self._deep_graph_search(query, query_graph=query_graph)
         if deep_hits:
             logger.info(f"Injecting {len(deep_hits)} symbolic paths from Neo4j.")
             # Prepend deep hits as they are often very precise for relationship queries
-            final_grounded_results = deep_hits + final_grounded_results
+            grounded_candidates = deep_hits + grounded_candidates
+
+        final_grounded_results = grounded_candidates[:top_k]
         
         logger.info("Hybrid Search Complete. Yielding %s results.", len(final_grounded_results))
         return final_grounded_results

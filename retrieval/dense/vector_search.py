@@ -2,6 +2,7 @@
 Dense Retrieval Module for NovaSearch.
 """
 import logging
+import re
 from typing import List, Dict, Any
 from abc import ABC, abstractmethod
 from abc import ABC, abstractmethod
@@ -17,6 +18,21 @@ except ImportError:
     pass
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_terms(text: str) -> List[str]:
+    return [token for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]+", (text or "").lower()) if len(token) > 2]
+
+
+def _title_overlap_boost(query: str, title: str) -> float:
+    query_terms = set(_normalize_terms(query))
+    title_terms = set(_normalize_terms(title))
+    if not query_terms or not title_terms:
+        return 0.0
+    overlap = len(query_terms & title_terms)
+    if overlap == 0:
+        return 0.0
+    return min(0.35, overlap * 0.08)
 
 class BaseDenseRetriever(ABC):
     """Abstract base class for dense vector retrievers."""
@@ -44,9 +60,13 @@ class PGVectorDenseRetriever(BaseDenseRetriever):
         
         sql = """
             SELECT 
-                doc_id, index, chunk_text, 
+                c.doc_id,
+                c.index,
+                c.chunk_text,
+                d.title,
                 1 - (embedding <=> %s::vector) AS similarity_score
-            FROM chunks
+            FROM chunks c
+            LEFT JOIN documents d ON d.id = c.doc_id
             ORDER BY embedding <=> %s::vector
             LIMIT %s;
         """
@@ -58,11 +78,16 @@ class PGVectorDenseRetriever(BaseDenseRetriever):
                 cur.execute(sql, (vector_str, vector_str, top_k))
                 rows = cur.fetchall()
                 for row in rows:
+                    title = row["title"] or ""
+                    base_score = float(row["similarity_score"])
+                    boosted_score = base_score + _title_overlap_boost(query, title)
                     results.append({
                         "doc_id": row["doc_id"],
                         "chunk_index": row["index"],
                         "chunk_text": row["chunk_text"],
-                        "score": float(row["similarity_score"]),
+                        "title": title,
+                        "score": boosted_score,
+                        "base_score": base_score,
                         "source": "dense"
                     })
         except Exception as e:
