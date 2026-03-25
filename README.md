@@ -243,9 +243,38 @@ pytest tests/ -v --ignore=tests/benchmark_rag.py --ignore=tests/load_test.py
 # Benchmarks
 python tests/benchmark_rag.py
 
+# HotpotQA 100-sample
+BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation python tests/benchmark_rag.py
+
+# Natural Questions (BeIR/NQ) 100-sample
+BENCHMARK_NAME=nq BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=test python tests/benchmark_rag.py
+
+# Larger run example
+BENCHMARK_NAME=nq BENCHMARK_SAMPLE_SIZE=500 BENCHMARK_SPLIT=test python tests/benchmark_rag.py
+
 # Load test
 python tests/load_test.py
 ```
+
+Natural Questions is integrated through a BeIR/NQ-style corpus + queries + qrels track rather than `nq_open`, so the benchmark remains honest to NovaSearch's ingestion-and-retrieval architecture. See [docs/nq_benchmark_integration.md](docs/nq_benchmark_integration.md).
+
+---
+
+## Evidence Quality Controls
+
+NovaSearch now supports explicit feature flags for multi-hop evidence orchestration and ablation:
+
+```bash
+ENABLE_EARLY_SECOND_HOP=true|false
+ENABLE_BRIDGE_PLANNER=true|false
+ENABLE_DUAL_HEAD_SCORING=true|false
+ENABLE_RAW_LEXICAL_RECALL=true|false
+ENABLE_RETRIEVAL_DEBUG=true|false
+```
+
+When `ENABLE_RETRIEVAL_DEBUG=true`, `/ask` metadata includes stage-level retrieval diagnostics (candidate counts, source-type/evidence-role mix, dedup impact, bridge/support coverage) so you can trace where evidence quality degrades.
+
+For a full architecture audit and rationale, see [docs/retrieval_evidence_audit.md](docs/retrieval_evidence_audit.md).
 
 ---
 

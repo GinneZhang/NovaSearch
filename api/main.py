@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import json
+import math
 
 try:
     from dotenv import load_dotenv
@@ -37,6 +38,16 @@ import io
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def _safe_numeric(value, fallback: float = 0.0) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if math.isnan(numeric) or math.isinf(numeric):
+        return fallback
+    return numeric
 
 # Lifespan context manager for startup/shutdown
 @asynccontextmanager
@@ -111,6 +122,21 @@ def ask_copilot(request: QueryRequest):
     session_id = request.session_id or str(uuid.uuid4())
     logger.info("Handling /ask request for query: '%s', session: '%s'", request.query, session_id)
 
+    def serialize_sources(raw_sources):
+        sources_schema = []
+        for s in raw_sources or []:
+            sources_schema.append({
+                "doc_id": s.get("doc_id", "unknown"),
+                "title": s.get("title") or s.get("graph_context", {}).get("doc_title"),
+                "chunk_text": s.get("chunk_text", ""),
+                "score": _safe_numeric(
+                    s.get("final_rank_score"),
+                    _safe_numeric(s.get("cross_encoder_score"), _safe_numeric(s.get("score", 0.0)))
+                ),
+                "graph_context": s.get("graph_context")
+            })
+        return sources_schema
+
     def generate_stream():
         yield json.dumps({
             "type": "thought", 
@@ -125,18 +151,12 @@ def ask_copilot(request: QueryRequest):
                 top_k=request.top_k
             ):
                 if chunk.get("type") == "answer_metadata":
-                    sources_schema = []
-                    for s in chunk.get("sources", []):
-                        sources_schema.append({
-                            "doc_id": s.get("doc_id", "unknown"),
-                            "title": s.get("title") or s.get("graph_context", {}).get("doc_title"),
-                            "chunk_text": s.get("chunk_text", ""),
-                            "score": s.get("cross_encoder_score", s.get("score", 0.0)),
-                            "graph_context": s.get("graph_context")
-                        })
                     yield json.dumps({
                         "type": "answer_metadata",
-                        "sources": sources_schema,
+                        "sources": serialize_sources(chunk.get("sources", [])),
+                        "retrieval_contexts": serialize_sources(chunk.get("retrieval_contexts", [])),
+                        "generation_contexts": serialize_sources(chunk.get("generation_contexts", [])),
+                        "debug_metrics": chunk.get("debug_metrics"),
                         "session_id": chunk.get("session_id"),
                         "consistency_score": chunk.get("consistency_score"),
                         "hallucination_warning": chunk.get("hallucination_warning")

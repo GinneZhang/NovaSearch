@@ -243,9 +243,20 @@ pytest tests/ -v --ignore=tests/benchmark_rag.py --ignore=tests/load_test.py
 # 基准测试
 python tests/benchmark_rag.py
 
+# HotpotQA 100-sample
+BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation python tests/benchmark_rag.py
+
+# Natural Questions (BeIR/NQ) 100-sample
+BENCHMARK_NAME=nq BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=test python tests/benchmark_rag.py
+
+# 更大规模示例
+BENCHMARK_NAME=nq BENCHMARK_SAMPLE_SIZE=500 BENCHMARK_SPLIT=test python tests/benchmark_rag.py
+
 # 负载测试
 python tests/load_test.py
 ```
+
+Natural Questions 这次通过 BeIR/NQ 形式接入，也就是 `corpus + queries + qrels`，而不是直接使用只包含 `question + answer` 的 `nq_open`。这样更符合 NovaSearch 当前“先摄入语料，再检索与回答”的评测结构。详见 [docs/nq_benchmark_integration.md](docs/nq_benchmark_integration.md)。
 
 ---
 
