@@ -1,5 +1,5 @@
 """
-Sparse Retrieval Module for NovaSearch.
+Sparse Retrieval Module for AsterScope.
 """
 import logging
 import re

@@ -2,7 +2,7 @@
 
 ## Why This Change
 
-The current NovaSearch chain-aware pipeline already built many candidate chains on HotpotQA, but the final evidence set still retained almost no bridge evidence. In the latest 100-sample Ragas run:
+The current AsterScope chain-aware pipeline already built many candidate chains on HotpotQA, but the final evidence set still retained almost no bridge evidence. In the latest 100-sample Ragas run:
 
 - `avg_candidate_chains = 24.75`
 - `avg_selected_chains = 5.7`
@@ -19,7 +19,7 @@ Key mechanism:
 - retrieve evidence sequentially while conditioning on previously retrieved documents
 - score reasoning paths rather than isolated paragraphs
 
-Relevant takeaway for NovaSearch:
+Relevant takeaway for AsterScope:
 - once a passage has already been identified as a bridge hop in a reasoning path, later stages should not require it to look like a strong direct-answer chunk before it survives.
 
 ### Beam Retrieval
@@ -29,7 +29,7 @@ Key mechanism:
 - maintain multiple partial hypotheses during retrieval
 - reduce early retrieval errors by preserving plausible partial paths
 
-Relevant takeaway for NovaSearch:
+Relevant takeaway for AsterScope:
 - if a chain has already been selected, its bridge member should get path-level credit in final evidence selection and packing.
 - otherwise chain-aware retrieval degenerates back into flat top-N reranking.
 
@@ -39,7 +39,7 @@ Source: [NAACL 2024 OpenReview](https://openreview.net/forum?id=vZmtOnp6KF)
 Key mechanism:
 - apply heavier retrieval/reasoning only when query complexity warrants it
 
-Relevant takeaway for NovaSearch:
+Relevant takeaway for AsterScope:
 - we should keep the existing adaptive chain mode logic, but when `full` mode is selected, the system should actually preserve chain-completing evidence rather than immediately collapsing back to direct-only evidence.
 
 ## Concrete Fix Applied

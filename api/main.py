@@ -1,5 +1,5 @@
 """
-Main FastAPI entry point for NovaSearch.
+Main FastAPI entry point for AsterScope.
 """
 
 import os
@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(
-    title="NovaSearch API",
+    title="AsterScope API",
     description="Enterprise Copilot & Intelligent Retrieval Engine",
     version="1.0.0",
     lifespan=lifespan
@@ -101,7 +101,7 @@ except Exception as e:
 @app.get("/health")
 async def health_check():
     """Healthcheck endpoint."""
-    return {"status": "ok", "service": "NovaSearch API"}
+    return {"status": "ok", "service": "AsterScope API"}
 
 
 @app.post("/ask", dependencies=[Depends(get_api_key)])
@@ -219,7 +219,7 @@ async def ask_vision(
 def _insert_chunks_to_postgres(doc_id: str, title: str, section: str, chunks: list):
     """Helper to insert generated chunks and dense vectors into Postgres."""
     pg_dsn = os.getenv("DATABASE_URL", 
-        f"dbname={os.getenv('POSTGRES_DB', 'novasearch')} "
+        f"dbname={os.getenv('POSTGRES_DB', 'asterscope')} "
         f"user={os.getenv('POSTGRES_USER', 'postgres')} "
         f"password={os.getenv('POSTGRES_PASSWORD', 'postgres_secure_password')} "
         f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
@@ -362,7 +362,7 @@ def ingest_document(
                     raise RuntimeError(f"Elasticsearch persistence failed: {sparse_err}") from sparse_err
 
             # 3. Persist to Neo4j (Knowledge Graph Construction)
-            benchmark_mode = os.getenv("NOVASEARCH_BENCHMARK_MODE", "false").lower() in {"1", "true", "yes"}
+            benchmark_mode = os.getenv("ASTERSCOPE_BENCHMARK_MODE", os.getenv("NOVASEARCH_BENCHMARK_MODE", "false")).lower() in {"1", "true", "yes"}
             enable_graph_ingestion = os.getenv(
                 "ENABLE_GRAPH_INGESTION",
                 "false" if benchmark_mode else "true"

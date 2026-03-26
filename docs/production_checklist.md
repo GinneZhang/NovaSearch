@@ -1,10 +1,10 @@
-# NovaSearch v1.0.0 — Production Checklist
+# AsterScope v1.0.0 — Production Checklist
 
 <p align="center">
   <a href="production_checklist.md">[English]</a> | <a href="production_checklist_cn.md">[中文文档]</a>
 </p>
 
-> **Purpose**: Complete verification checklist before deploying NovaSearch to a production environment.
+> **Purpose**: Complete verification checklist before deploying AsterScope to a production environment.
 
 ---
 
@@ -121,7 +121,7 @@ python tests/load_test.py
 - [ ] HPA autoscaling verified (API: 2-10, Retrieval: 2-8)
 - [ ] Liveness probes pass (`/health` for API, PG+Redis check for Retrieval)
 - [ ] Readiness probes pass
-- [ ] Helm chart deployed via `helm install novasearch deploy/helm/novasearch/`
+- [ ] Helm chart deployed via `helm install asterscope deploy/helm/asterscope/`
 
 ---
 

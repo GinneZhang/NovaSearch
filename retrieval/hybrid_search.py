@@ -1,5 +1,5 @@
 """
-Hybrid Search Coordinator for NovaSearch.
+Hybrid Search Coordinator for AsterScope.
 
 This module orchestrates:
 1. Dense Retrieval (via vector_search.py)
@@ -75,7 +75,7 @@ class HybridSearchCoordinator:
         """
         # 1. Setup PostgreSQL (PGVector & FTS)
         self.pg_dsn = pg_dsn or os.getenv("DATABASE_URL", 
-            f"dbname={os.getenv('POSTGRES_DB', 'novasearch')} "
+            f"dbname={os.getenv('POSTGRES_DB', 'asterscope')} "
             f"user={os.getenv('POSTGRES_USER', 'postgres')} "
             f"password={os.getenv('POSTGRES_PASSWORD', 'postgres_secure_password')} "
             f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
@@ -122,7 +122,7 @@ class HybridSearchCoordinator:
             self.cross_encoder = CrossEncoderReranker()
 
         # 3. Setup Neo4j (Graph Retrieval)
-        benchmark_mode = os.getenv("NOVASEARCH_BENCHMARK_MODE", "false").lower() in {"1", "true", "yes"}
+        benchmark_mode = os.getenv("ASTERSCOPE_BENCHMARK_MODE", os.getenv("NOVASEARCH_BENCHMARK_MODE", "false")).lower() in {"1", "true", "yes"}
         self.enable_graph_retrieval = os.getenv(
             "ENABLE_GRAPH_RETRIEVAL",
             "false" if benchmark_mode else "true"

@@ -1,4 +1,4 @@
-# NovaSearch Benchmark Report
+# AsterScope Benchmark Report
 
 ## Scope
 
@@ -8,7 +8,7 @@ This report uses benchmark-native, paper-style task metrics for external reporti
 - `MuSiQue`: `Answer EM / F1`
 - `ASQA`: diagnostic `Answer EM / F1` only
 
-`Ragas` metrics and NovaSearch chain/debug fields are retained for internal optimization, but are intentionally excluded from this public-facing report.
+`Ragas` metrics and AsterScope chain/debug fields are retained for internal optimization, but are intentionally excluded from this public-facing report.
 
 ## Experimental Setup
 
@@ -21,7 +21,7 @@ This report uses benchmark-native, paper-style task metrics for external reporti
 Run notes:
 
 - Runtime: `http://127.0.0.1:8032`
-- Code path: current chain-aware NovaSearch with adaptive chain activation, budgeted chain expansion, and concise grounded answer projection
+- Code path: current chain-aware AsterScope with adaptive chain activation, budgeted chain expansion, and concise grounded answer projection
 - `Ragas` was skipped for these report-mode runs: `BENCHMARK_SKIP_RAGAS=true`
 
 ## Main Results
@@ -52,7 +52,7 @@ Read this table as an engineering side view, not as the main task score:
 
 ## Representative Published Upper Bounds
 
-These are task-difficulty references from representative strong papers. They are not all directly comparable to NovaSearch’s current report numbers.
+These are task-difficulty references from representative strong papers. They are not all directly comparable to AsterScope’s current report numbers.
 
 | Dataset | Representative System | Venue | Official Metric | Published Result |
 |---|---|---|---|---|
@@ -62,7 +62,7 @@ These are task-difficulty references from representative strong papers. They are
 
 ## Gap to Published References
 
-| Dataset | NovaSearch Current | Reference | Absolute Gap |
+| Dataset | AsterScope Current | Reference | Absolute Gap |
 |---|---|---|---|
 | HotpotQA | EM 22.0 / F1 28.9 | EM 72.69 / F1 85.04 | EM -50.69 / F1 -56.14 |
 | MuSiQue | F1 30.2 | F1 69.2 | F1 -39.0 |
@@ -70,7 +70,7 @@ These are task-difficulty references from representative strong papers. They are
 
 Interpretation:
 
-- `HotpotQA`: NovaSearch is still far below strong full-benchmark multi-hop systems, but it is no longer near-zero after the current refinement pass.
+- `HotpotQA`: AsterScope is still far below strong full-benchmark multi-hop systems, but it is no longer near-zero after the current refinement pass.
 - `MuSiQue`: the gap is still large, but the current code now lands in a more meaningful range for further multi-hop retrieval work.
 - `ASQA`: the current answer projection is optimized for short benchmark answers; ASQA should ultimately be judged with its official long-form metrics rather than `EM/F1`.
 
@@ -90,6 +90,6 @@ Current reading:
 
 ## Trace Files
 
-- [kpi_trace_hotpot_report_refined.json](/Users/ginnezhang/Documents/Playground/NovaSearch/docs/kpi_trace_hotpot_report_refined.json)
-- [kpi_trace_musique_report_refined.json](/Users/ginnezhang/Documents/Playground/NovaSearch/docs/kpi_trace_musique_report_refined.json)
-- [kpi_trace_asqa_report_refined.json](/Users/ginnezhang/Documents/Playground/NovaSearch/docs/kpi_trace_asqa_report_refined.json)
+- [kpi_trace_hotpot_report_refined.json](/Users/ginnezhang/Documents/Playground/AsterScope/docs/kpi_trace_hotpot_report_refined.json)
+- [kpi_trace_musique_report_refined.json](/Users/ginnezhang/Documents/Playground/AsterScope/docs/kpi_trace_musique_report_refined.json)
+- [kpi_trace_asqa_report_refined.json](/Users/ginnezhang/Documents/Playground/AsterScope/docs/kpi_trace_asqa_report_refined.json)

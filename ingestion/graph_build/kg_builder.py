@@ -1,5 +1,5 @@
 """
-Knowledge Graph Builder for NovaSearch.
+Knowledge Graph Builder for AsterScope.
 
 This module is responsible for taking document chunks and ingesting them into Neo4j.
 It connects via the official neo4j driver and constructs the following schema:

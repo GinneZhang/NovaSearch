@@ -1,5 +1,5 @@
 """
-FAISS Dense Retrieval Module for NovaSearch.
+FAISS Dense Retrieval Module for AsterScope.
 """
 import os
 import json

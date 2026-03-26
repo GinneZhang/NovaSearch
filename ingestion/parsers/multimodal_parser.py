@@ -1,5 +1,5 @@
 """
-Multimodal Parser for NovaSearch.
+Multimodal Parser for AsterScope.
 
 Capable of extracting text from raw strings, PDFs (with table detection),
 DOCX (with table extraction), and Images (OCR).

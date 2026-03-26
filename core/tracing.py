@@ -1,5 +1,5 @@
 """
-OpenTelemetry / Jaeger Trace Propagation for NovaSearch.
+OpenTelemetry / Jaeger Trace Propagation for AsterScope.
 
 Provides cross-service trace_id propagation to fulfill the
 "Explainability" claim. Integrates with FastAPI middleware to
@@ -37,7 +37,7 @@ except ImportError:
     logger.info("OpenTelemetry SDK not installed. Using fallback trace propagation.")
 
 
-def init_tracing(app=None, service_name: str = "novasearch") -> None:
+def init_tracing(app=None, service_name: str = "asterscope") -> None:
     """
     Initialize OpenTelemetry tracing with Jaeger exporter.
 
@@ -116,7 +116,7 @@ class NovaTracer:
     Generates trace_id / span_id for log correlation and request tracking.
     """
 
-    def __init__(self, service_name: str = "novasearch"):
+    def __init__(self, service_name: str = "asterscope"):
         self.service_name = service_name
 
     @contextmanager

@@ -1,5 +1,5 @@
 """
-Comprehensive benchmark runner for NovaSearch.
+Comprehensive benchmark runner for AsterScope.
 
 Supports:
 - HotpotQA (page-supervised, multi-hop)
@@ -155,7 +155,7 @@ def reset_benchmark_stores():
     )
     pg_dsn = os.getenv(
         "DATABASE_URL",
-        f"dbname={os.getenv('POSTGRES_DB', 'novasearch')} "
+        f"dbname={os.getenv('POSTGRES_DB', 'asterscope')} "
         f"user={os.getenv('POSTGRES_USER', 'postgres')} "
         f"password={os.getenv('POSTGRES_PASSWORD', 'postgres_secure_password')} "
         f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
@@ -616,7 +616,7 @@ def build_summary_payload(
         "retrieved_token_total": total_context_tokens,
         "ingestion_duration_seconds": ingest_duration,
         "query_duration_seconds": query_duration,
-        "benchmark_mode": os.getenv("NOVASEARCH_BENCHMARK_MODE", "false").lower() in {"1", "true", "yes"},
+        "benchmark_mode": os.getenv("ASTERSCOPE_BENCHMARK_MODE", os.getenv("NOVASEARCH_BENCHMARK_MODE", "false")).lower() in {"1", "true", "yes"},
         "graph_ingestion_enabled": os.getenv("ENABLE_GRAPH_INGESTION", "false").lower() in {"1", "true", "yes"},
         "graph_retrieval_enabled": os.getenv("ENABLE_GRAPH_RETRIEVAL", "false").lower() in {"1", "true", "yes"},
         "vision_retriever_enabled": os.getenv("ENABLE_VISION_RETRIEVER", "true").lower() in {"1", "true", "yes"},
@@ -669,7 +669,7 @@ def print_summary(summary: Dict[str, Any]):
         print(f"| {metric_name} | {rendered} |")
 
     print("\n" + "=" * 60)
-    print("KPI DIMENSION 2: NOVASEARCH DEBUG SUMMARY")
+    print("KPI DIMENSION 2: ASTERSCOPE DEBUG SUMMARY")
     print("=" * 60)
     print(f"| Second-hop Trigger Rate | {summary['second_hop_trigger_rate']:.2f} |")
     print(f"| Avg First-hop Candidates | {summary['avg_first_hop_candidates']:.1f} |")
@@ -722,7 +722,7 @@ def print_summary(summary: Dict[str, Any]):
 
 
 async def main_async():
-    base_url = os.getenv("NOVASEARCH_URL", "http://127.0.0.1:8000")
+    base_url = os.getenv("ASTERSCOPE_URL", os.getenv("NOVASEARCH_URL", "http://127.0.0.1:8000"))
     api_key = os.getenv("API_KEY", "")
     headers = {"X-API-KEY": api_key}
     inprocess_mode = _benchmark_bool("BENCHMARK_INPROCESS", False)
@@ -882,7 +882,7 @@ async def main_async():
                 await _run_benchmark_flow(client, base_url)
         return
 
-    print(f"Waiting for NovaSearch API at {base_url}...")
+    print(f"Waiting for AsterScope API at {base_url}...")
     for i in range(45):
         try:
             with httpx.Client() as check_client:

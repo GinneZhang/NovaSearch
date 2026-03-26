@@ -1,4 +1,4 @@
-# NovaSearch Helm Values — Default Configuration
+# AsterScope Helm Values — Default Configuration
 
 replicaCount:
   api: 2
@@ -6,11 +6,11 @@ replicaCount:
 
 image:
   api:
-    repository: novasearch/api
+    repository: asterscope/api
     tag: latest
     pullPolicy: IfNotPresent
   retrieval:
-    repository: novasearch/retrieval
+    repository: asterscope/retrieval
     tag: latest
     pullPolicy: IfNotPresent
 
@@ -70,11 +70,11 @@ externalSecrets:
     name: aws-secrets-manager
     kind: ClusterSecretStore
   remoteRefs:
-    - key: novasearch/openai-api-key
+    - key: asterscope/openai-api-key
       property: OPENAI_API_KEY
-    - key: novasearch/postgres-password
+    - key: asterscope/postgres-password
       property: POSTGRES_PASSWORD
-    - key: novasearch/neo4j-password
+    - key: asterscope/neo4j-password
       property: NEO4J_PASSWORD
 
 # --- Velero Backup Annotations (Phase 14) ---
@@ -85,11 +85,11 @@ velero:
     pre.hook.backup.velero.io/command: '["/bin/sh", "-c", "pg_dump -U $POSTGRES_USER $POSTGRES_DB > /backup/pre-backup.sql"]'
     pre.hook.backup.velero.io/container: postgresql
   schedule:
-    name: novasearch-daily
+    name: asterscope-daily
     schedule: "0 2 * * *"
     ttl: 168h0m0s
     includedNamespaces:
-      - novasearch
+      - asterscope
 
 # --- OpenTelemetry / Jaeger (Phase 14) ---
 tracing:
@@ -106,7 +106,7 @@ env:
   OPENAI_API_KEY: ""
   POSTGRES_HOST: postgresql
   POSTGRES_PORT: "5432"
-  POSTGRES_DB: novasearch
+  POSTGRES_DB: asterscope
   POSTGRES_USER: postgres
   POSTGRES_PASSWORD: ""
   REDIS_HOST: redis

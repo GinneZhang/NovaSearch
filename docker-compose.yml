@@ -3,11 +3,11 @@ version: '3.8'
 services:
   postgres:
     image: ankane/pgvector:latest
-    container_name: novasearch-postgres
+    container_name: asterscope-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-novasearch}
+      POSTGRES_DB: ${POSTGRES_DB:-asterscope}
     ports:
       - "5432:5432"
     volumes:
@@ -16,7 +16,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: novasearch-redis
+    container_name: asterscope-redis
     ports:
       - "6379:6379"
     volumes:
@@ -25,7 +25,7 @@ services:
 
   neo4j:
     image: neo4j:5
-    container_name: novasearch-neo4j
+    container_name: asterscope-neo4j
     environment:
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-password}
       NEO4J_PLUGINS: '["apoc"]'
@@ -39,7 +39,7 @@ services:
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
-    container_name: novasearch-elastic
+    container_name: asterscope-elastic
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false

@@ -1,5 +1,5 @@
 """
-Symbolic Reasoning Engine for NovaSearch.
+Symbolic Reasoning Engine for AsterScope.
 
 Provides a deterministic verification layer that validates LLM-generated
 answers against the symbolic facts retrieved from the Knowledge Graph.

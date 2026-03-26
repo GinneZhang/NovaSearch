@@ -45,7 +45,7 @@ class PGVectorVisionRetriever:
 
     def _connect_db(self):
         pg_dsn = os.getenv("DATABASE_URL", 
-            f"dbname={os.getenv('POSTGRES_DB', 'novasearch')} "
+            f"dbname={os.getenv('POSTGRES_DB', 'asterscope')} "
             f"user={os.getenv('POSTGRES_USER', 'postgres')} "
             f"password={os.getenv('POSTGRES_PASSWORD', 'postgres_secure_password')} "
             f"host={os.getenv('POSTGRES_HOST', 'localhost')} "

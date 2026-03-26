@@ -1,5 +1,5 @@
 """
-Hardened Ontology Manager for NovaSearch.
+Hardened Ontology Manager for AsterScope.
 
 Provides a formal mapping layer between extracted query triplets and the
 canonical Neo4j schema. Replaces fuzzy string matching with embedding-based

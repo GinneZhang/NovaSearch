@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: novasearch-redis
+  name: asterscope-redis
 spec:
   replicas: 1
   selector:
@@ -22,7 +22,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: novasearch-redis-svc
+  name: asterscope-redis-svc
 spec:
   selector:
     app: redis

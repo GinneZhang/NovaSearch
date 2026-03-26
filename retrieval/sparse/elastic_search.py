@@ -1,5 +1,5 @@
 """
-Elasticsearch Sparse Retrieval Module for NovaSearch.
+Elasticsearch Sparse Retrieval Module for AsterScope.
 """
 import os
 import logging
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class ElasticSparseRetriever(BaseSparseRetriever):
     """Handles Sparse TF-IDF/BM25 Keyword Matching via Elasticsearch."""
     
-    def __init__(self, index_name: str = "novasearch-chunks"):
+    def __init__(self, index_name: str = "asterscope-chunks"):
         self.index_name = index_name
         es_url = os.getenv("ELASTIC_URL", "http://localhost:9200")
         

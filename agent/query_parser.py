@@ -1,5 +1,5 @@
 """
-Structured Query Graph Parser for NovaSearch.
+Structured Query Graph Parser for AsterScope.
 Converts natural language queries into semantic triplets for guided retrieval.
 Validates extracted triplets against the live Neo4j schema.
 """

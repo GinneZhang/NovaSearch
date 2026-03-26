@@ -1,5 +1,5 @@
 """
-Redis Session Memory Manager for NovaSearch.
+Redis Session Memory Manager for AsterScope.
 """
 import os
 import json

@@ -1,5 +1,5 @@
 """
-Sliding Window Chunker logic for NovaSearch Ingestion Module.
+Sliding Window Chunker logic for AsterScope Ingestion Module.
 """
 import logging
 from typing import List, Dict, Any

@@ -1,5 +1,5 @@
 """
-End-to-End Integration Tests for NovaSearch API.
+End-to-End Integration Tests for AsterScope API.
 Requires local Docker infrastructure to be running (PostgreSQL, Redis, Neo4j).
 """
 

@@ -1,5 +1,5 @@
 """
-Pydantic Schemas for NovaSearch API.
+Pydantic Schemas for AsterScope API.
 """
 
 from typing import List, Dict, Any, Optional
@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 class QueryRequest(BaseModel):
     """
-    Incoming request to the NovaSearch /ask endpoint.
+    Incoming request to the AsterScope /ask endpoint.
     """
     query: str = Field(..., description="The natural language question to ask the Copilot.")
     session_id: Optional[str] = Field(default=None, description="Optional UUID for conversation history. Generated if blank.")
@@ -29,7 +29,7 @@ class SourceChunk(BaseModel):
 
 class QueryResponse(BaseModel):
     """
-    Outgoing response from the NovaSearch /ask endpoint.
+    Outgoing response from the AsterScope /ask endpoint.
     """
     answer: str = Field(..., description="The source-grounded generated answer from the LLM.")
     session_id: str = Field(..., description="UUID returned to client to continue the conversation.")

@@ -1,5 +1,5 @@
 """
-Failure Injection / Resilience Tests for NovaSearch.
+Failure Injection / Resilience Tests for AsterScope.
 
 Tests that the system's fail-closed guardrails, retry loops, and graceful
 degradation work correctly under error conditions:

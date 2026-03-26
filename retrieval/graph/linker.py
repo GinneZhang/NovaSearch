@@ -1,5 +1,5 @@
 """
-Vector-Based Entity Linker for NovaSearch Knowledge Graph.
+Vector-Based Entity Linker for AsterScope Knowledge Graph.
 
 Maps extracted entity mentions to canonical Neo4j node IDs using
 embedding similarity search against the Entity node index.

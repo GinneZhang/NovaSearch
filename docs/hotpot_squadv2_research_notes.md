@@ -16,13 +16,13 @@ Primary source:
 
 - [Learning to Retrieve Reasoning Paths over Wikipedia Graph for Question Answering](https://arxiv.org/abs/1911.10470)
 
-Mechanism relevant to NovaSearch:
+Mechanism relevant to AsterScope:
 
 - retrieve later hops conditioned on earlier evidence
 - keep reasoning paths, not just flat passages
 - let the reader score whole paths, not isolated chunks
 
-Adaptation for NovaSearch:
+Adaptation for AsterScope:
 
 - preserve complete chains longer through final candidate selection
 - do not let a chain-backed bridge chunk compete as if it were just another background chunk
@@ -34,13 +34,13 @@ Primary sources:
 - [End-to-End Beam Retrieval for Multi-Hop Question Answering](https://openreview.net/forum?id=rFKfiuOdZBg)
 - [Official repository](https://github.com/canghongjian/beam_retriever)
 
-Mechanism relevant to NovaSearch:
+Mechanism relevant to AsterScope:
 
 - maintain several partial path hypotheses
 - expand a path with bounded beam size instead of flattening candidates too early
 - score and prune at path level
 
-Adaptation for NovaSearch:
+Adaptation for AsterScope:
 
 - preserve a small bundle from high-value complete chains
 - prefer one direct/support chunk plus one bridge chunk from the same chain when the chain is already strong
@@ -51,12 +51,12 @@ Primary source:
 
 - [Adaptive-RAG: Learning to Adapt Retrieval-Augmented Large Language Models through Question Complexity](https://aclanthology.org/2024.naacl-long.389/)
 
-Mechanism relevant to NovaSearch:
+Mechanism relevant to AsterScope:
 
 - simple questions should not pay the cost of heavy multi-step retrieval
 - strong direct evidence should trigger a lighter path
 
-Adaptation for NovaSearch:
+Adaptation for AsterScope:
 
 - more aggressive `bypass` for simple, low-bridge, high-direct-evidence queries
 - use existing runtime signals instead of a dataset-specific classifier
@@ -67,12 +67,12 @@ Primary sources:
 
 - [Official repository](https://github.com/nju-websoft/ChainRAG)
 
-Mechanism relevant to NovaSearch:
+Mechanism relevant to AsterScope:
 
 - missing key entities in decomposition create "lost-in-retrieval"
 - progressive retrieval and rewriting helps preserve the question-to-evidence chain
 
-Adaptation for NovaSearch:
+Adaptation for AsterScope:
 
 - downstream stages should respect already identified bridge entities and chain roles
 - final context packing should preserve chain-backed support/bridge pairs instead of re-flattening them

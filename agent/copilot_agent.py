@@ -1,7 +1,7 @@
 """
 Enterprise Copilot Agent Logic.
 
-This module acts as the "brain" of NovaSearch. It orchestrates the retrieval
+This module acts as the "brain" of AsterScope. It orchestrates the retrieval
 of context via the HybridSearchCoordinator and constructs source-grounded LLM
 prompts for the OpenAI API to enforce strict adherence to enterprise facts.
 """
@@ -306,7 +306,7 @@ class EnterpriseCopilotAgent:
         Constructs the rigorous anti-hallucination system prompt.
         """
         if benchmark_grounded:
-            return """You are NovaSearch Copilot in benchmark answer mode.
+            return """You are AsterScope Copilot in benchmark answer mode.
 Answer the user's question using ONLY the provided `<CONTEXT>` blocks.
 
 STRICT RULES:
@@ -316,7 +316,7 @@ STRICT RULES:
 4. Every factual sentence must include an inline citation in the format [Doc: Title, Section: Section Name].
 5. Do not use outside knowledge, speculation, or unstated assumptions.
 """
-        return """You are NovaSearch Copilot, a highly precise, compliance-focused enterprise AI assistant.
+        return """You are AsterScope Copilot, a highly precise, compliance-focused enterprise AI assistant.
 Your primary directive is to answer the user's query ONLY using the provided `<CONTEXT>` blocks.
 
 STRICT GENERATION RULES (Must be followed exactly):
@@ -2974,18 +2974,27 @@ If the user greets you or asks about your capabilities, you may respond naturall
         Yields dictionaries with 'type' indicating 'thought', 'token', 'error', or 'answer_metadata'.
         """
         logger.info("Agent processing query: '%s'", query)
-        benchmark_mode = os.getenv("NOVASEARCH_BENCHMARK_MODE", "false").lower() in {"1", "true", "yes"}
+        benchmark_mode = os.getenv("ASTERSCOPE_BENCHMARK_MODE", os.getenv("NOVASEARCH_BENCHMARK_MODE", "false")).lower() in {"1", "true", "yes"}
         benchmark_generate_answer = os.getenv(
-            "NOVASEARCH_BENCHMARK_GENERATE_ANSWER", "false"
+            "ASTERSCOPE_BENCHMARK_GENERATE_ANSWER",
+            os.getenv("NOVASEARCH_BENCHMARK_GENERATE_ANSWER", "false")
         ).lower() in {"1", "true", "yes"}
-        benchmark_context_limit = int(os.getenv("NOVASEARCH_BENCHMARK_CONTEXT_LIMIT", "4"))
-        benchmark_source_limit = int(os.getenv("NOVASEARCH_BENCHMARK_SOURCE_LIMIT", "2"))
-        benchmark_max_chunks_per_title = int(os.getenv("NOVASEARCH_BENCHMARK_MAX_CHUNKS_PER_TITLE", "2"))
+        benchmark_context_limit = int(os.getenv("ASTERSCOPE_BENCHMARK_CONTEXT_LIMIT", os.getenv("NOVASEARCH_BENCHMARK_CONTEXT_LIMIT", "4")))
+        benchmark_source_limit = int(os.getenv("ASTERSCOPE_BENCHMARK_SOURCE_LIMIT", os.getenv("NOVASEARCH_BENCHMARK_SOURCE_LIMIT", "2")))
+        benchmark_max_chunks_per_title = int(
+            os.getenv("ASTERSCOPE_BENCHMARK_MAX_CHUNKS_PER_TITLE", os.getenv("NOVASEARCH_BENCHMARK_MAX_CHUNKS_PER_TITLE", "2"))
+        )
         benchmark_generation_max_chunks_per_title = int(
-            os.getenv("NOVASEARCH_BENCHMARK_GENERATION_MAX_CHUNKS_PER_TITLE", "1")
+            os.getenv(
+                "ASTERSCOPE_BENCHMARK_GENERATION_MAX_CHUNKS_PER_TITLE",
+                os.getenv("NOVASEARCH_BENCHMARK_GENERATION_MAX_CHUNKS_PER_TITLE", "1"),
+            )
         )
         benchmark_generation_background_limit = int(
-            os.getenv("NOVASEARCH_BENCHMARK_GENERATION_BACKGROUND_LIMIT", "1")
+            os.getenv(
+                "ASTERSCOPE_BENCHMARK_GENERATION_BACKGROUND_LIMIT",
+                os.getenv("NOVASEARCH_BENCHMARK_GENERATION_BACKGROUND_LIMIT", "1"),
+            )
         )
         enable_support_context_inheritance = self._resolve_feature_flag(
             "ENABLE_SUPPORT_CONTEXT_INHERITANCE", False

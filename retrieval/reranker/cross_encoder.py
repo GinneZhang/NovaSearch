@@ -1,5 +1,5 @@
 """
-Cross-Encoder Reranking Module for NovaSearch.
+Cross-Encoder Reranking Module for AsterScope.
 """
 import logging
 from typing import List, Dict, Any

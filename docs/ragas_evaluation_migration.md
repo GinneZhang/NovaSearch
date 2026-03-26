@@ -2,14 +2,14 @@
 
 ## What Changed
 
-NovaSearch benchmark scoring now uses Ragas as the primary evaluation framework.
+AsterScope benchmark scoring now uses Ragas as the primary evaluation framework.
 
 The benchmark runner still:
 
 - loads benchmark datasets
-- ingests reference documents into NovaSearch
+- ingests reference documents into AsterScope
 - runs `/ask`
-- preserves NovaSearch runtime preflight and chain/debug metadata
+- preserves AsterScope runtime preflight and chain/debug metadata
 
 But it no longer computes custom benchmark summary metrics such as hand-rolled faithfulness, custom context precision, EM/F1, or title-hit metrics in the final summary path.
 
@@ -41,10 +41,10 @@ BENCHMARK_RAGAS_METRICS=context_precision,context_recall,answer_relevancy,faithf
 Two evaluation modes are supported:
 
 1. `BENCHMARK_CONTEXT_MODE=generation`
-   Uses NovaSearch `generation_contexts`
+   Uses AsterScope `generation_contexts`
 
 2. `BENCHMARK_CONTEXT_MODE=retrieval`
-   Uses NovaSearch `retrieval_contexts`
+   Uses AsterScope `retrieval_contexts`
 
 ## Benchmark Tracks
 
@@ -56,9 +56,9 @@ The current standardized tracks are:
 
 `squad` and `squad_v2` fit the Ragas migration better than the previous BeIR/NQ track because they provide official reference answers and reference contexts.
 
-## What NovaSearch Still Preserves
+## What AsterScope Still Preserves
 
-Ragas is now the official scorer, but NovaSearch internal observability is still preserved per sample and in the benchmark summary. This includes fields such as:
+Ragas is now the official scorer, but AsterScope internal observability is still preserved per sample and in the benchmark summary. This includes fields such as:
 
 - `chain_mode_selected`
 - `chain_activation_reason`

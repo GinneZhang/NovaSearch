@@ -1,5 +1,5 @@
 """
-Formal Agent State Machine for NovaSearch.
+Formal Agent State Machine for AsterScope.
 
 Provides durable conversational state tracking, a DependencyGraph for
 Plan-and-Execute multi-hop flows, and stateful clarification persistence.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NovaSearch Warmup Script / NovaSearch 预热脚本
+AsterScope Warmup Script / AsterScope 预热脚本
 
 Pre-loads all ML models and verifies database connections before the API
 accepts its first query. This eliminates cold-start latency.
@@ -37,7 +37,7 @@ def check_postgres():
         conn = psycopg2.connect(
             host=os.getenv("POSTGRES_HOST", "localhost"),
             port=int(os.getenv("POSTGRES_PORT", "5432")),
-            dbname=os.getenv("POSTGRES_DB", "novasearch"),
+            dbname=os.getenv("POSTGRES_DB", "asterscope"),
             user=os.getenv("POSTGRES_USER", "postgres"),
             password=os.getenv("POSTGRES_PASSWORD", "")
         )
@@ -114,7 +114,7 @@ def preload_sentence_transformer():
         t0 = time.time()
         model = SentenceTransformer("all-MiniLM-L6-v2")
         # Warm the model with a test encode
-        model.encode("NovaSearch warmup test")
+        model.encode("AsterScope warmup test")
         elapsed = time.time() - t0
         logger.info(f"{PASS} SentenceTransformer (all-MiniLM-L6-v2) — loaded in {elapsed:.1f}s")
         return True
@@ -129,7 +129,7 @@ def preload_clip():
         from sentence_transformers import SentenceTransformer
         t0 = time.time()
         model = SentenceTransformer("clip-ViT-B-32")
-        model.encode("NovaSearch CLIP warmup")
+        model.encode("AsterScope CLIP warmup")
         elapsed = time.time() - t0
         logger.info(f"{PASS} CLIP (clip-ViT-B-32) — loaded in {elapsed:.1f}s")
         return True
@@ -180,7 +180,7 @@ def preload_spacy():
         import spacy
         t0 = time.time()
         nlp = spacy.load("en_core_web_sm")
-        nlp("NovaSearch warmup test for named entity recognition.")
+        nlp("AsterScope warmup test for named entity recognition.")
         elapsed = time.time() - t0
         logger.info(f"{PASS} spaCy (en_core_web_sm) — loaded in {elapsed:.1f}s")
         return True
@@ -194,7 +194,7 @@ def preload_spacy():
 
 def main():
     logger.info("=" * 60)
-    logger.info("NovaSearch Warmup — Starting / 开始预热")
+    logger.info("AsterScope Warmup — Starting / 开始预热")
     logger.info("=" * 60)
 
     total_start = time.time()
@@ -232,11 +232,11 @@ def main():
 
     if critical_failures:
         logger.error(f"\n{FAIL} CRITICAL FAILURES / 关键失败: {', '.join(critical_failures)}")
-        logger.error("NovaSearch may not function correctly. Fix these before starting the API.")
-        logger.error("NovaSearch 可能无法正常工作。请在启动 API 前修复这些问题。")
+        logger.error("AsterScope may not function correctly. Fix these before starting the API.")
+        logger.error("AsterScope 可能无法正常工作。请在启动 API 前修复这些问题。")
         sys.exit(1)
     else:
-        logger.info(f"\n{PASS} All critical systems ready. NovaSearch is warm! / 所有关键系统就绪。NovaSearch 已预热！")
+        logger.info(f"\n{PASS} All critical systems ready. AsterScope is warm! / 所有关键系统就绪。AsterScope 已预热！")
         sys.exit(0)
 
 

@@ -1,10 +1,10 @@
-# NovaSearch v1.0.0 — 生产环境检查清单
+# AsterScope v1.0.0 — 生产环境检查清单
 
 <p align="center">
   <a href="production_checklist.md">[English]</a> | <a href="production_checklist_cn.md">[中文文档]</a>
 </p>
 
-> **目的**：将 NovaSearch 部署到生产环境前的完整验证检查清单。
+> **目的**：将 AsterScope 部署到生产环境前的完整验证检查清单。
 
 ---
 
@@ -121,7 +121,7 @@ python tests/load_test.py
 - [ ] HPA 自动扩缩已验证（API: 2-10, Retrieval: 2-8）
 - [ ] 存活探针通过（API: `/health`，Retrieval: PG+Redis 检查）
 - [ ] 就绪探针通过
-- [ ] Helm chart 已部署：`helm install novasearch deploy/helm/novasearch/`
+- [ ] Helm chart 已部署：`helm install asterscope deploy/helm/asterscope/`
 
 ---
 

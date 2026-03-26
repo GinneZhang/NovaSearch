@@ -1,6 +1,6 @@
 apiVersion: v2
-name: novasearch
-description: NovaSearch Enterprise Copilot & Intelligent Retrieval Engine
+name: asterscope
+description: AsterScope Enterprise Copilot & Intelligent Retrieval Engine
 type: application
 version: 1.0.0
 appVersion: "1.0.0"
@@ -11,4 +11,4 @@ keywords:
   - multimodal
   - copilot
 maintainers:
-  - name: NovaSearch Team
+  - name: AsterScope Team

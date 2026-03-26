@@ -1,5 +1,5 @@
 """
-Dense Retrieval Module for NovaSearch.
+Dense Retrieval Module for AsterScope.
 """
 import logging
 import re

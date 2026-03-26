@@ -1,5 +1,5 @@
 """
-Ragas integration helpers for NovaSearch benchmarks.
+Ragas integration helpers for AsterScope benchmarks.
 """
 
 from __future__ import annotations
@@ -89,8 +89,8 @@ class RagasEvaluationResult:
 
 class RagasRunner:
     """
-    Runs Ragas metrics against NovaSearch benchmark rows while keeping
-    NovaSearch debug metadata untouched as side-channel diagnostics.
+    Runs Ragas metrics against AsterScope benchmark rows while keeping
+    AsterScope debug metadata untouched as side-channel diagnostics.
     """
 
     def __init__(

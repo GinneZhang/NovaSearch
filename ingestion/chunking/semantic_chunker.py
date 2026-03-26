@@ -1,5 +1,5 @@
 """
-Semantic Chunker logic for NovaSearch Ingestion Module.
+Semantic Chunker logic for AsterScope Ingestion Module.
 
 This module provides the SemanticChunker class which splits documents into atomic
 sentences, embeds them, and uses Agglomerative Clustering to group conceptually 

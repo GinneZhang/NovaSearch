@@ -1,10 +1,10 @@
-# NovaSearch: Enterprise Copilot & Intelligent Retrieval Engine
+# AsterScope: Enterprise Copilot & Intelligent Retrieval Engine
 
 <p align="center">
   <a href="README.md">[English]</a> | <a href="README_CN.md">[中文文档]</a>
 </p>
 
-NovaSearch is a production-hardened enterprise knowledge retrieval and reasoning system implementing **"Tri-Engine Fusion"**: **LLM Semantics + Hybrid Multimodal RAG + Knowledge Graph Reasoning**.
+AsterScope is a production-hardened enterprise knowledge retrieval and reasoning system implementing **"Tri-Engine Fusion"**: **LLM Semantics + Hybrid Multimodal RAG + Knowledge Graph Reasoning**.
 
 Our objective is to deliver highly accurate, explainable, and hallucination-resistant Copilot experiences for enterprise SOPs, compliance documents, and structured knowledge.
 
@@ -124,8 +124,8 @@ The following capabilities are **planned but not yet implemented**:
 ### 2. Clone & Setup
 
 ```bash
-git clone https://github.com/GinneZhang/NovaSearch.git
-cd NovaSearch
+git clone https://github.com/GinneZhang/AsterScope.git
+cd AsterScope
 python -m venv .venv
 source .venv/bin/activate      # macOS/Linux
 # .venv\Scripts\Activate.ps1   # Windows PowerShell
@@ -166,7 +166,7 @@ Expected output:
 [WARMUP] SentenceTransformer (all-MiniLM-L6-v2) — loaded in 2.1s
 [WARMUP] CLIP (clip-ViT-B-32) — loaded in 3.4s
 [WARMUP] Cross-Encoder (ms-marco-MiniLM-L-6-v2) — loaded in 1.8s
-[WARMUP] All critical systems ready. NovaSearch is warm!
+[WARMUP] All critical systems ready. AsterScope is warm!
 ```
 
 ### 5. Launch the API Server
@@ -259,13 +259,13 @@ BENCHMARK_NAME=squad_v2 BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BEN
 python tests/load_test.py
 ```
 
-The benchmark runner now uses Ragas as the primary evaluation framework. Official metrics are reported through Ragas, while NovaSearch-specific chain/debug fields are preserved as side-channel diagnostics. See [docs/ragas_evaluation_migration.md](docs/ragas_evaluation_migration.md).
+The benchmark runner now uses Ragas as the primary evaluation framework. Official metrics are reported through Ragas, while AsterScope-specific chain/debug fields are preserved as side-channel diagnostics. See [docs/ragas_evaluation_migration.md](docs/ragas_evaluation_migration.md).
 
 ---
 
 ## Evidence Quality Controls
 
-NovaSearch now supports explicit feature flags for multi-hop evidence orchestration and ablation:
+AsterScope now supports explicit feature flags for multi-hop evidence orchestration and ablation:
 
 ```bash
 ENABLE_EARLY_SECOND_HOP=true|false
@@ -297,8 +297,8 @@ For a full architecture audit and rationale, see [docs/retrieval_evidence_audit.
 ## Recommended Startup Flow
 
 ```bash
-git clone https://github.com/GinneZhang/NovaSearch.git
-cd NovaSearch
+git clone https://github.com/GinneZhang/AsterScope.git
+cd AsterScope
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # Fill in keys

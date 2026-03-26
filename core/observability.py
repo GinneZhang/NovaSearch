@@ -1,5 +1,5 @@
 """
-Observability Hooks for NovaSearch.
+Observability Hooks for AsterScope.
 
 Provides structured performance metrics tracking for retrieval engines,
 LLM calls, and consistency evaluation. Logs metrics in a format compatible
@@ -28,7 +28,7 @@ class LatencyRecord:
 
 class MetricsCollector:
     """
-    Centralized metrics collector for NovaSearch pipeline observability.
+    Centralized metrics collector for AsterScope pipeline observability.
     
     Tracks:
         - Retrieval latency per engine (Vector, Graph, Sparse, Vision)

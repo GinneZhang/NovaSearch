@@ -1,5 +1,5 @@
 """
-Shared benchmark adapters and metric helpers for NovaSearch evaluation.
+Shared benchmark adapters and metric helpers for AsterScope evaluation.
 """
 
 from __future__ import annotations

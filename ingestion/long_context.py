@@ -1,5 +1,5 @@
 """
-LlamaIndex Long-Context Module for NovaSearch.
+LlamaIndex Long-Context Module for AsterScope.
 
 Provides specialized handling for very large documents (e.g., 100+ page DOCX/PDF)
 where standard chunking fails to preserve cross-section semantics.

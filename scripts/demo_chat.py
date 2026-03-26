@@ -26,7 +26,7 @@ def chat():
     }
 
     print("==================================================")
-    print("Welcome to NovaSearch Enterprise Copilot CLI")
+    print("Welcome to AsterScope Enterprise Copilot CLI")
     print("Type 'exit' or 'quit' to close the session.")
     print("==================================================\n")
     

@@ -1,5 +1,5 @@
 """
-Database Initialization Bootstrapper for NovaSearch.
+Database Initialization Bootstrapper for AsterScope.
 """
 
 import os
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 def init_postgres():
     """Initializes PostgreSQL with pgvector and required tables/indexes."""
     pg_dsn = os.getenv("DATABASE_URL", 
-        f"dbname={os.getenv('POSTGRES_DB', 'novasearch')} "
+        f"dbname={os.getenv('POSTGRES_DB', 'asterscope')} "
         f"user={os.getenv('POSTGRES_USER', 'postgres')} "
         f"password={os.getenv('POSTGRES_PASSWORD', 'postgres_secure_password')} "
         f"host={os.getenv('POSTGRES_HOST', 'localhost')} "
@@ -93,7 +93,7 @@ def init_neo4j():
 
 def initialize_databases():
     """Bootstraps all required local databases."""
-    logger.info("Bootstrapping NovaSearch Databases...")
+    logger.info("Bootstrapping AsterScope Databases...")
     init_postgres()
     init_neo4j()
     logger.info("Database bootstrapping complete.")

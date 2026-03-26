@@ -1,5 +1,5 @@
 """
-Reciprocal Rank Fusion Reranker Module for NovaSearch.
+Reciprocal Rank Fusion Reranker Module for AsterScope.
 """
 from typing import List, Dict, Any, Tuple
 

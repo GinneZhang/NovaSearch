@@ -1,4 +1,4 @@
-# NovaSearch v1.0.0 — Release Notes
+# AsterScope v1.0.0 — Release Notes
 
 <p align="center">
   <a href="release_notes_v1.0.0.md">[English]</a> | <a href="release_notes_v1.0.0_cn.md">[中文文档]</a>
@@ -11,14 +11,14 @@
 
 ## Overview
 
-NovaSearch v1.0.0 is the first production-ready release of the Enterprise Copilot & Intelligent Retrieval Engine. This version represents **12 phases of iterative architectural evolution**, progressing from a functional MVP to a production-hardened, enterprise-grade platform.
+AsterScope v1.0.0 is the first production-ready release of the Enterprise Copilot & Intelligent Retrieval Engine. This version represents **12 phases of iterative architectural evolution**, progressing from a functional MVP to a production-hardened, enterprise-grade platform.
 
 ---
 
 ## 🏗️ Architecture Highlights
 
 ### Tri-Engine Fusion
-The core of NovaSearch is the "Tri-Engine Fusion" architecture combining LLM semantics, hybrid multimodal RAG, and knowledge graph reasoning.
+The core of AsterScope is the "Tri-Engine Fusion" architecture combining LLM semantics, hybrid multimodal RAG, and knowledge graph reasoning.
 
 ### Phase 1–4: Foundation
 
@@ -130,4 +130,4 @@ The core of NovaSearch is the "Tri-Engine Fusion" architecture combining LLM sem
 
 ---
 
-**Built with ❤️ by the NovaSearch Team**
+**Built with ❤️ by the AsterScope Team**

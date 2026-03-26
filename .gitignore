@@ -1,5 +1,5 @@
 # ==========================================
-# NovaSearch Project .gitignore
+# AsterScope Project .gitignore
 # Enterprise Copilot & Intelligent Retrieval
 # ==========================================
 
@@ -42,7 +42,9 @@ dump.rdb
 # ------------------------------------------
 .cache/
 .huggingface/
+.hf_cache/
 .chroma/
+.vendor/
 models/
 lora_weights/
 *.safetensors
@@ -118,3 +120,9 @@ Thumbs.db
 # ------------------------------------------
 .ipynb_checkpoints/
 *.ipynb
+
+# ------------------------------------------
+# 9. Local Benchmark Scratch Files
+# ------------------------------------------
+docs/tmp_*.json
+docs/* 2.md
