@@ -23,12 +23,6 @@ except ImportError:
 
 import openai
 
-# Assuming hybrid_search is in the project's Python path
-from retrieval.hybrid_search import HybridSearchCoordinator
-from core.memory import RedisMemoryManager
-from agent.planner import TaskDecomposer
-from agent.query_parser import QueryGraphParser
-
 logger = logging.getLogger(__name__)
 
 
@@ -89,7 +83,12 @@ class EnterpriseCopilotAgent:
         else:
             self.model = model or os.getenv("OPENAI_CHAT_MODEL", "gpt-4.1")
             self.client = self.openai_client
-        
+
+        from retrieval.hybrid_search import HybridSearchCoordinator
+        from core.memory import RedisMemoryManager
+        from agent.planner import TaskDecomposer
+        from agent.query_parser import QueryGraphParser
+
         # Instantiate Tri-Engine Retrieval Coordinator
         self.retriever = HybridSearchCoordinator()
         
@@ -104,17 +103,19 @@ class EnterpriseCopilotAgent:
 
     def _format_context(self, hits: List[Dict[str, Any]]) -> str:
         """
-        Assembles retrieved chunks and graph metadata into a highly structured
-        string format for the LLM prompt.
+        Assembles retrieved chunks into a citation-first knowledge block,
+        closer to RAGFlow's document-grounded prompt structure.
         """
         if not hits:
             return "No relevant context found."
 
         context_blocks = []
         for i, hit in enumerate(hits):
-            # Extract basic info
             source = hit.get("source", "unknown")
-            score = hit.get("score", 0.0)
+            score = _safe_numeric(
+                hit.get("final_rank_score"),
+                _safe_numeric(hit.get("score"), 0.0),
+            )
             text = hit.get("chunk_text", "").strip()
             evidence_role = str(hit.get("evidence_role") or hit.get("role") or "support").strip().upper()
             source_type = self._infer_hit_source_type(hit).upper()
@@ -122,8 +123,8 @@ class EnterpriseCopilotAgent:
             primary_chain_id = hit.get("primary_chain_id")
             primary_chain_rank = hit.get("primary_chain_rank")
             best_chain_score = _safe_numeric(hit.get("best_chain_score"), 0.0)
+            family_role = str(hit.get("ragflow_family_role") or "").strip().upper()
             
-            # Extract Graph Context
             graph_info = hit.get("graph_context")
             if graph_info:
                 title = graph_info.get("doc_title", "Unknown Title")
@@ -132,14 +133,16 @@ class EnterpriseCopilotAgent:
                 title = hit.get("title", "Unknown Document")
                 section = "General"
 
-            # Format the block with strict tracking markers
-            block = f"--- [Document {i+1}] ---\n"
-            block += f"[Source Marker]: [Doc: {title}, Section: {section}]\n"
-            block += f"[Retrieval Type]: {source.upper()} (Score: {score:.3f})\n"
-            block += f"[Evidence Role]: {evidence_role}\n"
-            block += f"[Source Type]: {source_type}\n"
+            block = f"[Knowledge {i+1}]\n"
+            block += f"ID: K{i+1}\n"
+            block += f"Title: {title}\n"
+            block += f"Section: {section}\n"
+            block += f"Retrieval: {source.upper()} | SourceType={source_type} | Score={score:.3f}\n"
+            block += f"EvidenceRole: {evidence_role}\n"
+            if family_role:
+                block += f"FamilyRole: {family_role}\n"
             if primary_chain_id:
-                block += f"[Evidence Chain]: {primary_chain_id}"
+                block += f"EvidenceChain: {primary_chain_id}"
                 if primary_chain_rank:
                     block += f" (rank {primary_chain_rank}"
                     if best_chain_score:
@@ -147,10 +150,11 @@ class EnterpriseCopilotAgent:
                     block += ")"
                 block += "\n"
             if merged_indices:
-                block += f"[Merged Chunk Indices]: {', '.join(str(idx) for idx in merged_indices)}\n"
+                block += f"MergedChunkIndices: {', '.join(str(idx) for idx in merged_indices)}\n"
             if hit.get("is_corroborated") is not None:
-                block += f"[Corroborated]: {'YES' if hit.get('is_corroborated') else 'NO'}\n"
-            block += f"[Content]: {text}\n"
+                block += f"Corroborated: {'YES' if hit.get('is_corroborated') else 'NO'}\n"
+            block += "Content:\n"
+            block += f"{text}\n"
             context_blocks.append(block)
 
         return "\n".join(context_blocks)
@@ -705,13 +709,6 @@ If the user greets you or asks about your capabilities, you may respond naturall
 
         return [row["hit"] for row in kept_rows], blocked
 
-    def _extract_benchmark_bridge_queries(self, query: str, hits: List[Dict[str, Any]]) -> List[str]:
-        """
-        Backward-compatible wrapper around generic bridge follow-up planning.
-        The implementation intentionally avoids dataset-specific relation rules.
-        """
-        return self._deterministic_bridge_follow_up_queries(query, hits, query_graph=None)
-
     def _extract_bridge_entity_candidates(self, query: str, hits: List[Dict[str, Any]]) -> List[str]:
         query_terms = set(_normalize_terms(query))
         query_subject_candidates = self._extract_query_subject_candidates(query)
@@ -950,37 +947,6 @@ If the user greets you or asks about your capabilities, you may respond naturall
             _append(obj[:4])
 
         return hints[:4]
-
-    def _build_subject_anchor_follow_up_queries(self, query: str, focus_hints: List[str]) -> List[str]:
-        subjects = self._extract_query_subject_candidates(query)
-        if not subjects:
-            return []
-
-        ordered_focus_terms: List[str] = []
-        seen_focus = set()
-        for hint in focus_hints:
-            for token in _normalize_terms(hint):
-                if token in _QUERY_FOCUS_STOPWORDS or token in seen_focus:
-                    continue
-                seen_focus.add(token)
-                ordered_focus_terms.append(token)
-
-        anchored_queries: List[str] = []
-        seen = set()
-        for subject in subjects[:2]:
-            subject_terms = set(_normalize_terms(subject))
-            suffix_terms = [
-                token for token in ordered_focus_terms
-                if token not in subject_terms
-            ][:3]
-            candidate = subject if not suffix_terms else f"{subject} {' '.join(suffix_terms)}"
-            lowered = candidate.lower()
-            if lowered in seen or lowered == query.lower().strip():
-                continue
-            anchored_queries.append(candidate)
-            seen.add(lowered)
-
-        return anchored_queries[:2]
 
     def _merge_priority_queries(self, priority_queries: List[str], fallback_queries: List[str], limit: int = 3) -> List[str]:
         merged: List[str] = []
@@ -1542,20 +1508,6 @@ If the user greets you or asks about your capabilities, you may respond naturall
 
         return subjects[:6]
 
-    def _augment_benchmark_sub_queries(self, query: str, sub_queries: List[str]) -> List[str]:
-        augmented = list(sub_queries)
-
-        def _append(candidate: str):
-            candidate = candidate.strip()
-            if candidate and candidate not in augmented:
-                augmented.append(candidate)
-
-        for subject in self._extract_query_subject_candidates(query)[:3]:
-            _append(subject)
-            _append(f"\"{subject}\"")
-
-        return augmented[:6]
-
     def _score_dual_head_hit(self, search_query: str, hit: Dict[str, Any]) -> Dict[str, float]:
         query_terms = set(_normalize_terms(search_query))
         title = (((hit.get("graph_context") or {}).get("doc_title")) or hit.get("title") or "").strip()
@@ -1809,7 +1761,20 @@ If the user greets you or asks about your capabilities, you may respond naturall
         context_str: str,
         draft_answer: str,
     ) -> str:
-        return self._project_benchmark_answer(query, context_str, draft_answer)
+        concise = self._extract_brief_answer_text(draft_answer)
+        if not self.client:
+            return concise
+        try:
+            reader_messages = self._build_benchmark_reader_messages(query, context_str, draft_answer)
+            reader_output = self._generate_buffered(reader_messages)
+            cleaned_reader = self._extract_brief_answer_text(reader_output)
+            if cleaned_reader and not self._is_refusal_answer(cleaned_reader):
+                return cleaned_reader
+        except Exception:
+            pass
+
+        projected = self._project_benchmark_answer(query, context_str, draft_answer)
+        return projected or concise
 
     def _update_generation_debug_metrics(
         self,
@@ -2031,6 +1996,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
             is_planner_confirmed = self._is_follow_up_confirmed_hit(hit, follow_up_queries)
             source_type = self._infer_hit_source_type(hit)
             is_graph_like = self._is_graph_like_source_type(source_type)
+            ragflow_family_role = str(hit.get("ragflow_family_role") or "").lower()
             primary_chain_id = str(hit.get("primary_chain_id") or "").strip()
             primary_chain_rank = int(hit.get("primary_chain_rank") or 0) if hit.get("primary_chain_rank") else 0
             best_chain_score = _safe_numeric(hit.get("best_chain_score"), 0.0)
@@ -2130,6 +2096,10 @@ If the user greets you or asks about your capabilities, you may respond naturall
             if is_planner_confirmed:
                 utility_score += 0.48 if role in {"answer", "bridge"} else 0.16
             if source_type == "lexical" and focus_overlap > 0:
+                utility_score += 0.18
+            if ragflow_family_role == "anchor":
+                utility_score += 0.42
+            elif ragflow_family_role == "companion":
                 utility_score += 0.18
             if is_graph_like and is_corroborated:
                 utility_score += 0.16
@@ -2489,111 +2459,6 @@ If the user greets you or asks about your capabilities, you may respond naturall
         }
         return compacted_hits[:limit]
 
-    def _select_benchmark_generation_hits(
-        self,
-        search_query: str,
-        hits: List[Dict[str, Any]],
-        limit: int,
-        max_chunks_per_title: int
-    ) -> List[Dict[str, Any]]:
-        if not hits or limit <= 0:
-            return []
-
-        query_lower = search_query.lower()
-        title_buckets: Dict[str, List[Dict[str, Any]]] = {}
-        ordered_bucket_keys: List[str] = []
-        query_terms = set(_normalize_terms(search_query))
-        for hit in hits:
-            graph_info = hit.get("graph_context") or {}
-            title = (graph_info.get("doc_title") or hit.get("title") or "").strip()
-            bucket_key = title.lower() or f"{hit.get('doc_id')}_{hit.get('chunk_index')}"
-            if bucket_key not in title_buckets:
-                ordered_bucket_keys.append(bucket_key)
-            title_buckets.setdefault(bucket_key, []).append(hit)
-
-        bucket_representatives: List[Dict[str, Any]] = []
-        for bucket_key in ordered_bucket_keys:
-            bucket_hits = title_buckets[bucket_key]
-            selected_bucket_hits = bucket_hits[:max(1, max_chunks_per_title)]
-
-            specific_queries: List[str] = []
-            seen_queries = set()
-            for hit in bucket_hits:
-                for retrieval_query in hit.get("retrieval_queries", []) or []:
-                    if not isinstance(retrieval_query, str):
-                        continue
-                    normalized = retrieval_query.strip()
-                    lowered = normalized.lower()
-                    if not normalized or lowered == query_lower or lowered in seen_queries:
-                        continue
-                    specific_queries.append(normalized)
-                    seen_queries.add(lowered)
-
-            if specific_queries and getattr(self.retriever, "cross_encoder", None):
-                ranking_query = max(specific_queries, key=len)
-                rerank_pool = [hit.copy() for hit in bucket_hits]
-                reranked_bucket = self.retriever.cross_encoder.rerank(
-                    ranking_query,
-                    rerank_pool,
-                    top_k=min(len(rerank_pool), max(2, max_chunks_per_title))
-                )
-                reranked_keys = {
-                    (hit.get("doc_id"), hit.get("chunk_index")): hit
-                    for hit in reranked_bucket
-                }
-                selected_bucket_hits = []
-                for original_hit in bucket_hits:
-                    key = (original_hit.get("doc_id"), original_hit.get("chunk_index"))
-                    if key in reranked_keys:
-                        selected_bucket_hits.append(original_hit)
-                selected_bucket_hits.sort(
-                    key=lambda hit: _safe_numeric(
-                        reranked_keys[(hit.get("doc_id"), hit.get("chunk_index"))].get("cross_encoder_score"),
-                        _safe_numeric(hit.get("final_rank_score"), _safe_numeric(hit.get("score", 0.0)))
-                    ),
-                    reverse=True
-                )
-                selected_bucket_hits = selected_bucket_hits[:max(1, max_chunks_per_title)]
-
-            for hit in selected_bucket_hits:
-                title_terms = set(_normalize_terms(hit.get("title") or ""))
-                text_terms = set(_normalize_terms(hit.get("chunk_text") or ""))
-                retrieval_terms = set()
-                for retrieval_query in hit.get("retrieval_queries", []) or []:
-                    retrieval_terms.update(_normalize_terms(retrieval_query))
-                body_text = hit.get("chunk_text", "") or ""
-                if "\n" in body_text:
-                    body_text = body_text.split("\n", 1)[1]
-                lead_chunk_bonus = 0.0
-                title = (hit.get("title") or "").strip().lower()
-                if title and body_text.strip().lower().startswith(title):
-                    lead_chunk_bonus = 0.45
-                title_retrieval_overlap = len(title_terms & retrieval_terms)
-                text_retrieval_overlap = len(text_terms & retrieval_terms)
-                weak_match_penalty = 0.0
-                if not (title_terms & query_terms) and not title_retrieval_overlap and not text_retrieval_overlap:
-                    weak_match_penalty = 0.35
-                hit["generation_selection_score"] = (
-                    _safe_numeric(hit.get("final_rank_score"), _safe_numeric(hit.get("score", 0.0)))
-                    + 0.12 * len(title_terms & query_terms)
-                    + 0.05 * len(text_terms & query_terms)
-                    + 0.18 * title_retrieval_overlap
-                    + 0.08 * text_retrieval_overlap
-                    + (0.2 if retrieval_terms else 0.0)
-                    + lead_chunk_bonus
-                    - weak_match_penalty
-                )
-                bucket_representatives.append(hit)
-
-        bucket_representatives.sort(
-            key=lambda hit: _safe_numeric(
-                hit.get("generation_selection_score"),
-                _safe_numeric(hit.get("final_rank_score"), _safe_numeric(hit.get("score", 0.0)))
-            ),
-            reverse=True
-        )
-        return bucket_representatives[:limit]
-
     def _select_benchmark_top_hits(
         self,
         search_query: str,
@@ -2787,52 +2652,6 @@ If the user greets you or asks about your capabilities, you may respond naturall
             selected_queries = refined or seeded_queries[:3]
             return selected_queries[:3]
 
-    def _plan_benchmark_sub_queries(self, query: str) -> List[str]:
-        if not self.openai_client:
-            return []
-
-        prompt = (
-            "You are a retrieval planner for multi-hop question answering.\n"
-            "Rewrite the user question into up to 3 standalone search queries that improve first-hop recall.\n"
-            "Rules:\n"
-            "1. Do not answer the question.\n"
-            "2. Use only entities or literal phrases present in the original question.\n"
-            "3. Prefer bridge-discovery queries such as identity, title, role, narrator, location, or alias lookups.\n"
-            "4. If the original question is already the best search query, you may return an empty list.\n"
-            "Return valid JSON with exactly this shape: {\"queries\": [\"...\"]}"
-        )
-
-        try:
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": query},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.0,
-                max_tokens=160,
-            )
-            payload = response.choices[0].message.content or "{}"
-            parsed = json.loads(payload)
-            queries = []
-            seen = set()
-            for candidate in parsed.get("queries", []):
-                if not isinstance(candidate, str):
-                    continue
-                normalized = candidate.strip()
-                if not normalized:
-                    continue
-                lowered = normalized.lower()
-                if lowered in seen or lowered == query.lower():
-                    continue
-                queries.append(normalized)
-                seen.add(lowered)
-            return queries[:3]
-        except Exception as e:
-            logger.warning("Benchmark sub-query planning failed: %s", str(e))
-            return []
-
     def _check_sufficiency(self, query: str, context: str) -> Dict[str, Any]:
         """
         Evaluates if the provided context is sufficient to answer the query.
@@ -2873,6 +2692,249 @@ If the user greets you or asks about your capabilities, you may respond naturall
         except Exception as e:
             logger.warning(f"Sufficiency check failed: {e}")
             return {"sufficient": True, "refinement": None}
+
+    def _format_ragflow_knowledge_blocks(
+        self,
+        hits: List[Dict[str, Any]],
+        max_blocks: int = 8,
+        max_chars: int = 900,
+    ) -> str:
+        blocks: List[str] = []
+        for idx, hit in enumerate(hits[:max_blocks], 1):
+            graph_info = hit.get("graph_context") or {}
+            title = graph_info.get("doc_title") or hit.get("title") or "Unknown"
+            source_type = hit.get("source_type") or hit.get("source") or "dense"
+            content = (hit.get("chunk_text") or hit.get("content") or "").strip()
+            if len(content) > max_chars:
+                content = content[:max_chars].rstrip() + "..."
+            blocks.append(
+                "\n".join(
+                    [
+                        f"ID: {idx}",
+                        f"Title: {title}",
+                        f"Source: {source_type}",
+                        "Content:",
+                        content,
+                    ]
+                )
+            )
+        return "\n\n".join(blocks)
+
+    def _check_ragflow_sufficiency(self, query: str, knowledge_blocks: str) -> Dict[str, Any]:
+        prompt = (
+            "You are a retrieval sufficiency judge for multi-hop QA.\n"
+            "Decide whether the provided knowledge blocks are sufficient to answer the question.\n"
+            "If not sufficient, explain the missing information briefly.\n"
+            "Return valid JSON with this exact schema:\n"
+            "{\"sufficient\": true|false, \"missing_information\": \"...\"}\n"
+            "Use an empty string for missing_information when sufficient."
+        )
+        user_prompt = (
+            f"Question:\n{query}\n\n"
+            f"Knowledge Blocks:\n{knowledge_blocks or '[none]'}"
+        )
+        try:
+            if not self.openai_client:
+                return {
+                    "sufficient": bool(knowledge_blocks and knowledge_blocks != "No relevant context found."),
+                    "missing_information": "",
+                }
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=120,
+            )
+            payload = response.choices[0].message.content or "{}"
+            parsed = json.loads(payload)
+            return {
+                "sufficient": bool(parsed.get("sufficient")),
+                "missing_information": str(parsed.get("missing_information") or "").strip(),
+            }
+        except Exception as e:
+            logger.warning("RAGFlow-style sufficiency check failed: %s", str(e))
+            fallback = self._check_sufficiency(query, knowledge_blocks)
+            return {
+                "sufficient": bool(fallback.get("sufficient")),
+                "missing_information": str(fallback.get("refinement") or "").strip(),
+            }
+
+    def _generate_ragflow_next_step_queries(
+        self,
+        question: str,
+        current_query: str,
+        missing_information: str,
+        knowledge_blocks: str,
+        limit: int = 2,
+    ) -> List[Dict[str, str]]:
+        if not missing_information:
+            return []
+        prompt = (
+            "You are generating next-step retrieval queries for recursive question answering.\n"
+            "Given the original question, current search query, missing information, and retrieved knowledge blocks,\n"
+            "produce up to 2 next-step retrieval steps that would fill the missing information.\n"
+            "Rules:\n"
+            "1. Each step must contain both a sub-question and a search query.\n"
+            "2. The sub-question should state the specific missing fact to resolve.\n"
+            "1. Queries must be short and entity-focused.\n"
+            "3. Prefer exact titles, aliases, roles, and relation-bearing phrases from the knowledge blocks.\n"
+            "4. Do not answer the question.\n"
+            "Return valid JSON with this exact shape: "
+            "{\"questions\": [{\"question\": \"...\", \"query\": \"...\"}]}"
+        )
+        user_prompt = (
+            f"Original Question:\n{question}\n\n"
+            f"Current Query:\n{current_query}\n\n"
+            f"Missing Information:\n{missing_information}\n\n"
+            f"Knowledge Blocks:\n{knowledge_blocks}"
+        )
+        try:
+            if not self.openai_client:
+                fallback_query = missing_information.strip()
+                return [{"question": fallback_query, "query": fallback_query}] if fallback_query else []
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=160,
+            )
+            payload = response.choices[0].message.content or "{}"
+            parsed = json.loads(payload)
+            steps: List[Dict[str, str]] = []
+            seen = set()
+            for candidate in parsed.get("questions", []):
+                if not isinstance(candidate, dict):
+                    continue
+                next_question = str(candidate.get("question") or "").strip()
+                next_query = str(candidate.get("query") or "").strip()
+                lowered = next_query.lower()
+                if not next_question or not next_query or lowered in seen or lowered == current_query.lower():
+                    continue
+                steps.append({"question": next_question, "query": next_query})
+                seen.add(lowered)
+                if len(steps) >= limit:
+                    break
+            return steps
+        except Exception as e:
+            logger.warning("RAGFlow-style next-step generation failed: %s", str(e))
+            fallback_query = missing_information.strip()
+            return [{"question": fallback_query, "query": fallback_query}] if fallback_query else []
+
+    def _run_ragflow_recursive_retrieval(
+        self,
+        question: str,
+        hits: List[Dict[str, Any]],
+        query_graph: Optional[List[Dict[str, Any]]],
+        top_k: int,
+        debug_metrics: Dict[str, Any],
+        depth: int = 2,
+    ) -> List[Dict[str, Any]]:
+        if not hits or depth <= 0:
+            return hits
+
+        accumulated = list(hits)
+        seen = {(hit.get("doc_id"), hit.get("chunk_index")) for hit in accumulated}
+        frontier: List[Dict[str, str]] = [{"question": question, "query": question}]
+        branch_limit = 2
+        debug_metrics.setdefault("ragflow_recursive_queries", [])
+        debug_metrics.setdefault("ragflow_missing_information", [])
+
+        for iteration in range(depth):
+            if not frontier:
+                debug_metrics["ragflow_recursive_stopped_reason"] = "frontier_exhausted"
+                break
+
+            knowledge_blocks = self._format_ragflow_knowledge_blocks(accumulated)
+            next_frontier: List[Dict[str, str]] = []
+            newly_added = 0
+            sufficiency_hit = False
+
+            for step in frontier[:branch_limit]:
+                step_question = str(step.get("question") or question).strip() or question
+                step_query = str(step.get("query") or step_question).strip() or step_question
+
+                suff = self._check_ragflow_sufficiency(step_question, knowledge_blocks)
+                if suff.get("sufficient"):
+                    sufficiency_hit = True
+                    continue
+
+                missing_information = str(suff.get("missing_information") or "").strip()
+                if missing_information:
+                    debug_metrics["ragflow_missing_information"].append(missing_information)
+
+                next_steps = self._generate_ragflow_next_step_queries(
+                    step_question,
+                    step_query,
+                    missing_information,
+                    knowledge_blocks,
+                    limit=branch_limit,
+                )
+                next_steps = [
+                    {"question": str(item.get("question") or "").strip(), "query": str(item.get("query") or "").strip()}
+                    for item in next_steps
+                    if isinstance(item, dict)
+                ]
+                next_steps = [item for item in next_steps if item["question"] and item["query"]]
+                if not next_steps:
+                    continue
+
+                debug_metrics["ragflow_recursive_queries"].append(next_steps)
+
+                for next_step in next_steps:
+                    next_query = next_step["query"]
+                    next_question = next_step["question"]
+                    candidate_pool = self.retriever.collect_candidate_pool(
+                        next_query,
+                        top_k=top_k,
+                        additional_queries=[],
+                        include_follow_ups=False,
+                    )
+                    new_hits = self.retriever.finalize_candidates(
+                        next_question,
+                        candidate_pool,
+                        top_k=top_k,
+                        query_graph=query_graph,
+                    )
+                    added_any = False
+                    for hit in new_hits:
+                        key = (hit.get("doc_id"), hit.get("chunk_index"))
+                        if key in seen:
+                            continue
+                        accumulated.append(hit)
+                        seen.add(key)
+                        newly_added += 1
+                        added_any = True
+                    if added_any:
+                        next_frontier.append(next_step)
+
+            if newly_added == 0:
+                debug_metrics["ragflow_recursive_stopped_reason"] = (
+                    "sufficient" if sufficiency_hit else "no_new_hits"
+                )
+                break
+
+            accumulated = self.retriever.finalize_candidates(
+                question,
+                accumulated[:],
+                top_k=max(top_k, len(accumulated)),
+                query_graph=query_graph,
+            )
+            seen = {(hit.get("doc_id"), hit.get("chunk_index")) for hit in accumulated}
+            frontier = next_frontier[:branch_limit]
+            debug_metrics["ragflow_recursive_added_hits"] = int(
+                debug_metrics.get("ragflow_recursive_added_hits", 0)
+            ) + newly_added
+
+        debug_metrics["ragflow_recursive_final_count"] = len(accumulated)
+        return accumulated
 
     def _classify_intent(self, query: str, chat_history: List[Dict[str, str]]) -> str:
         """
@@ -3008,6 +3070,10 @@ If the user greets you or asks about your capabilities, you may respond naturall
         enable_dual_head_scoring = self._resolve_feature_flag(
             "ENABLE_DUAL_HEAD_SCORING", False
         )
+        enable_ragflow_recursive_retrieval = self._resolve_feature_flag(
+            "ENABLE_RAGFLOW_RECURSIVE_RETRIEVAL",
+            benchmark_mode and benchmark_generate_answer,
+        )
         enable_retrieval_debug = self._resolve_feature_flag(
             "ENABLE_RETRIEVAL_DEBUG", True
         )
@@ -3019,6 +3085,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
             "enable_early_second_hop": enable_early_second_hop,
             "enable_bridge_planner": enable_bridge_planner,
             "enable_dual_head_scoring": enable_dual_head_scoring,
+            "enable_ragflow_recursive_retrieval": enable_ragflow_recursive_retrieval,
             "enable_retrieval_debug": enable_retrieval_debug,
             "first_hop_candidates": 0,
             "merged_candidate_count": 0,
@@ -3056,6 +3123,10 @@ If the user greets you or asks about your capabilities, you may respond naturall
             "generation_chain_count": 0,
             "supporting_inherited_chain_count": 0,
             "generation_uncorroborated_graph_count": 0,
+            "ragflow_recursive_queries": [],
+            "ragflow_missing_information": [],
+            "ragflow_recursive_added_hits": 0,
+            "ragflow_recursive_final_count": 0,
         }
         
         # 1. Ensure Session ID & Fetch History
@@ -3094,13 +3165,10 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 # Use LangChain to Decompose Complex Queries
                 planner_result = self.planner.decompose(search_query)
                 if isinstance(planner_result, dict) and planner_result.get("type") == "clarification":
-                    clarification_query = (planner_result.get("content") or "").strip()
-                    if benchmark_mode and benchmark_generate_answer and clarification_query:
-                        yield {"type": "thought", "content": f"Planner surfaced a bridge query for retrieval: '{clarification_query}'"}
-                        sub_queries = [search_query, clarification_query]
-                    else:
-                        yield {"type": "thought", "content": "Planner requested clarification, but continuing with the original query for retrieval coverage."}
-                        sub_queries = [search_query]
+                    # Benchmark evaluation should measure how well we answer the original query
+                    # from retrieved evidence, not how aggressively we fan out on a clarification.
+                    yield {"type": "thought", "content": "Planner requested clarification, but continuing with the original query for retrieval coverage."}
+                    sub_queries = [search_query]
                 else:
                     sub_queries = planner_result
 
@@ -3217,6 +3285,17 @@ If the user greets you or asks about your capabilities, you may respond naturall
             else:
                 all_hits = initial_hits[:]
                 debug_metrics["merged_candidate_count"] = len(first_hop_pool)
+
+            if enable_ragflow_recursive_retrieval and all_hits:
+                ragflow_top_k = max(retrieval_top_k, top_k * 3)
+                all_hits = self._run_ragflow_recursive_retrieval(
+                    search_query,
+                    all_hits,
+                    query_graph=query_graph,
+                    top_k=ragflow_top_k,
+                    debug_metrics=debug_metrics,
+                    depth=2,
+                )
             debug_metrics.update(self.retriever.last_search_debug or {})
             seen_chunk_ids = {
                 f"{hit.get('doc_id')}_{hit.get('chunk_index')}"

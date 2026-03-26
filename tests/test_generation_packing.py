@@ -42,6 +42,29 @@ def test_generate_benchmark_short_answer_prefers_non_refusal_projection_without_
     assert answer == "Gesellschaft mit beschrankter Haftung."
 
 
+def test_generate_benchmark_short_answer_prefers_exact_reader_output():
+    agent = _make_agent_stub()
+    agent.client = object()
+    calls = []
+
+    def _fake_generate_buffered(messages):
+        calls.append(messages[0]["content"])
+        if "exact-answer reader" in messages[0]["content"]:
+            return "Gesellschaft mit beschrankter Haftung"
+        return "VIVA Media GmbH stands for Gesellschaft mit beschrankter Haftung."
+
+    agent._generate_buffered = _fake_generate_buffered
+
+    answer = agent._generate_benchmark_short_answer(
+        "What does GmbH stand for?",
+        "GmbH means Gesellschaft mit beschrankter Haftung.",
+        "The renamed company used GmbH.",
+    )
+
+    assert answer == "Gesellschaft mit beschrankter Haftung"
+    assert any("exact-answer reader" in call for call in calls)
+
+
 def test_should_use_early_second_hop_for_full_chain_mode():
     agent = _make_agent_stub()
 
@@ -238,10 +261,98 @@ def test_generation_assembly_blocks_uncorroborated_symbolic_filler():
         follow_up_queries=[],
     )
 
+
+def test_format_ragflow_knowledge_blocks_includes_title_and_content():
+    agent = _make_agent_stub()
+    blocks = agent._format_ragflow_knowledge_blocks(
+        [
+            {
+                "title": "VIVA Media",
+                "chunk_text": "VIVA Media AG was renamed to VIVA Media GmbH in 2004.",
+                "source_type": "dense",
+            }
+        ]
+    )
+
+    assert "ID: 1" in blocks
+    assert "Title: VIVA Media" in blocks
+    assert "Content:" in blocks
+    assert "renamed to VIVA Media GmbH" in blocks
+
+
+def test_run_ragflow_recursive_retrieval_accumulates_new_hits():
+    agent = _make_agent_stub()
+
+    agent._check_ragflow_sufficiency = lambda question, knowledge_blocks: {
+        "sufficient": False,
+        "missing_information": "What does GmbH stand for?",
+    }
+    agent._generate_ragflow_next_step_queries = lambda question, current_query, missing_information, knowledge_blocks, limit=2: [
+        "Gesellschaft mit beschrankter Haftung"
+    ]
+
+    def _search(query, top_k=5, query_graph=None):
+        return [
+            {
+                "doc_id": "gmbh",
+                "chunk_index": 0,
+                "title": "Gesellschaft mit beschrankter Haftung",
+                "chunk_text": "GmbH stands for Gesellschaft mit beschrankter Haftung.",
+            }
+        ]
+
+    def _finalize(query, candidate_pool, top_k, query_graph=None):
+        return candidate_pool
+
+    agent.retriever.search = _search
+    agent.retriever.finalize_candidates = _finalize
+
+    debug = {}
+    hits = agent._run_ragflow_recursive_retrieval(
+        "What does the acronym stand for?",
+        [
+            {
+                "doc_id": "viva",
+                "chunk_index": 0,
+                "title": "VIVA Media",
+                "chunk_text": "VIVA Media AG was renamed to VIVA Media GmbH in 2004.",
+            }
+        ],
+        query_graph=None,
+        top_k=5,
+        debug_metrics=debug,
+        depth=1,
+    )
+
+    assert len(hits) == 2
+    assert debug["ragflow_recursive_added_hits"] == 1
+    assert debug["ragflow_recursive_final_count"] == 2
+
     selected_titles = {hit.get("title") for hit in selected}
     assert "Exception Workflow" in selected_titles
     assert "Acme Trading Policy" in selected_titles
     assert "Neo4j Symbolic Path" not in selected_titles
+
+
+def test_format_context_uses_citation_first_knowledge_blocks():
+    agent = _make_agent_stub()
+    formatted = agent._format_context([
+        {
+            "doc_id": "policy",
+            "chunk_index": 0,
+            "title": "Trading Policy",
+            "chunk_text": "The blackout period starts 15 days before quarter end.",
+            "source_type": "dense",
+            "evidence_role": "direct",
+            "ragflow_family_role": "anchor",
+            "final_rank_score": 1.2,
+        }
+    ])
+
+    assert "[Knowledge 1]" in formatted
+    assert "Title: Trading Policy" in formatted
+    assert "FamilyRole: ANCHOR" in formatted
+    assert "Content:" in formatted
 
 
 def test_generation_assembly_prefers_support_family_before_orphan_bridge():

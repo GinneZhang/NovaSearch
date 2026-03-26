@@ -51,10 +51,10 @@ Our objective is to deliver highly accurate, explainable, and hallucination-resi
 
 ### 5. Observability & Evaluation
 
-- `MetricsCollector` with per-engine latency tracking, error rates, and LLM-as-Judge scores.
+- `MetricsCollector` with per-engine latency tracking, retrieval-stage counters, and benchmark diagnostics.
 - `LatencyTimer` context manager for automatic operation timing.
 - **OpenTelemetry / Jaeger**: Cross-service `trace_id` propagation via `core/tracing.py`. Auto-instruments FastAPI with Jaeger and OTLP exporters.
-- RAGAS-inspired benchmark harness (Faithfulness, Answer Relevancy, Context Precision).
+- Fast benchmark harness with benchmark-native task metrics (`Answer EM/F1`, `Hit@5`, `MRR@5`) plus side-channel chain/debug summaries.
 - Concurrent load testing (10 threads) and failure injection resilience tests.
 
 ---
@@ -240,26 +240,50 @@ Embeds your image into a 512-dimensional CLIP vector and retrieves the closest t
 # Full test suite
 pytest tests/ -v --ignore=tests/benchmark_rag.py --ignore=tests/load_test.py
 
-# Benchmarks (Ragas-based)
+# Benchmarks (Custom Metrics)
 python tests/benchmark_rag.py
 
-# HotpotQA 100-sample (generation contexts -> Ragas)
-BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=generation python tests/benchmark_rag.py
+# Warm benchmark runtime (recommended for repeated runs)
+ASTERSCOPE_BENCHMARK_MODE=true ASTERSCOPE_BENCHMARK_GENERATE_ANSWER=true \
+ENABLE_GRAPH_INGESTION=false ENABLE_GRAPH_RETRIEVAL=false \
+ENABLE_VISION_RETRIEVER=false ENABLE_TEXT_VISION_INDEXING=false \
+uvicorn api.main:app --host 127.0.0.1 --port 8000
 
-# HotpotQA 100-sample (retrieval contexts -> Ragas)
-BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=retrieval python tests/benchmark_rag.py
+# Then point the runner at the warm service
+ASTERSCOPE_URL=http://127.0.0.1:8000 BENCHMARK_WARM_RUNTIME=true \
+BENCHMARK_QUERY_CONCURRENCY=8 BENCHMARK_WARMUP_QUERIES=2 \
+BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation \
+python tests/benchmark_rag.py
 
-# SQuAD 100-sample (generation contexts -> Ragas)
-BENCHMARK_NAME=squad BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=generation python tests/benchmark_rag.py
+# HotpotQA 100-sample
+BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation python tests/benchmark_rag.py
 
-# SQuAD 2.0 100-sample (retrieval contexts -> Ragas)
-BENCHMARK_NAME=squad_v2 BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=retrieval python tests/benchmark_rag.py
+# MuSiQue 100-sample
+BENCHMARK_NAME=musique BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation python tests/benchmark_rag.py
+
+# 2WikiMultiHopQA 100-sample (optional experiment track)
+BENCHMARK_NAME=two_wiki BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation python tests/benchmark_rag.py
 
 # Load test
 python tests/load_test.py
 ```
 
-The benchmark runner now uses Ragas as the primary evaluation framework. Official metrics are reported through Ragas, while AsterScope-specific chain/debug fields are preserved as side-channel diagnostics. See [docs/ragas_evaluation_migration.md](docs/ragas_evaluation_migration.md).
+The benchmark runner now uses fast custom metrics for the official summary:
+
+- `Answer EM`
+- `Answer F1`
+- `Hit Rate @ 5`
+- `MRR @ 5`
+- `Noise Reduction Ratio`
+- `Cost Savings`
+
+AsterScope-specific chain/debug fields are still preserved as side-channel diagnostics. See [docs/ragas_evaluation_migration.md](docs/ragas_evaluation_migration.md).
+
+Current recommended external benchmark tracks:
+
+- `HotpotQA` — primary multi-hop benchmark
+- `MuSiQue` — secondary multi-hop benchmark
+- `2WikiMultiHopQA` — optional experiment track, not part of the default public report
 
 ---
 

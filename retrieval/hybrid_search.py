@@ -324,6 +324,163 @@ class HybridSearchCoordinator:
 
         return follow_ups[:6]
 
+    def _ragflow_weighted_fusion(
+        self,
+        query: str,
+        dense_hits: List[Dict[str, Any]],
+        sparse_hits: List[Dict[str, Any]],
+        fetch_k: int,
+        dense_weight: float = 0.95,
+        sparse_weight: float = 0.05,
+    ) -> List[Dict[str, Any]]:
+        fused: Dict[tuple, Dict[str, Any]] = {}
+
+        def _normalize_rank_scores(hits: List[Dict[str, Any]], score_key: str) -> Dict[tuple, float]:
+            if not hits:
+                return {}
+            keyed_scores: Dict[tuple, float] = {}
+            raw_scores = [_safe_numeric(hit.get(score_key), 0.0) for hit in hits]
+            max_raw = max(raw_scores) if raw_scores else 0.0
+            min_raw = min(raw_scores) if raw_scores else 0.0
+            spread = max(max_raw - min_raw, 1e-6)
+            total = max(1, len(hits) - 1)
+            for rank, hit in enumerate(hits):
+                key = (hit.get("doc_id"), hit.get("chunk_index"))
+                rank_score = 1.0 - (rank / total if total else 0.0)
+                raw_score = (_safe_numeric(hit.get(score_key), 0.0) - min_raw) / spread
+                keyed_scores[key] = max(keyed_scores.get(key, 0.0), (0.65 * rank_score) + (0.35 * raw_score))
+            return keyed_scores
+
+        dense_scores = _normalize_rank_scores(dense_hits, "score")
+        sparse_scores = _normalize_rank_scores(sparse_hits, "score")
+
+        for hit in dense_hits:
+            key = (hit.get("doc_id"), hit.get("chunk_index"))
+            fused[key] = {**hit, "sources": ["dense"]}
+        for hit in sparse_hits:
+            key = (hit.get("doc_id"), hit.get("chunk_index"))
+            if key not in fused:
+                fused[key] = {**hit, "sources": ["sparse"]}
+            elif "sparse" not in fused[key]["sources"]:
+                fused[key]["sources"].append("sparse")
+                if len((hit.get("chunk_text") or "")) > len((fused[key].get("chunk_text") or "")):
+                    fused[key]["chunk_text"] = hit.get("chunk_text")
+                if not fused[key].get("title") and hit.get("title"):
+                    fused[key]["title"] = hit.get("title")
+
+        fused_hits: List[Dict[str, Any]] = []
+        for key, hit in fused.items():
+            dense_score = dense_scores.get(key, 0.0)
+            sparse_score = sparse_scores.get(key, 0.0)
+            title = hit.get("title") or ""
+            title_bonus = 0.04 * self._title_overlap(query, title)
+            weighted_score = (dense_weight * dense_score) + (sparse_weight * sparse_score) + title_bonus
+            fused_hit = {**hit}
+            fused_hit["rrf_score"] = weighted_score
+            fused_hit["hybrid_weighted_score"] = weighted_score
+            fused_hit["dense_rank_score"] = dense_score
+            fused_hit["sparse_rank_score"] = sparse_score
+            fused_hits.append(fused_hit)
+
+        fused_hits.sort(key=lambda x: _safe_numeric(x.get("hybrid_weighted_score"), 0.0), reverse=True)
+        return fused_hits[:fetch_k]
+
+    def _build_ragflow_family_pool(
+        self,
+        query: str,
+        reranked_hits: List[Dict[str, Any]],
+        fetch_k: int,
+    ) -> List[Dict[str, Any]]:
+        if not reranked_hits:
+            return []
+
+        query_terms = set(self._normalize_terms(query))
+        focus_terms = self._extract_query_focus_terms(query)
+        family_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+
+        for hit in reranked_hits[:fetch_k]:
+            title = ((hit.get("graph_context") or {}).get("doc_title") or hit.get("title") or "").strip()
+            family_key = (title or str(hit.get("doc_id") or "")).lower() or f"{hit.get('doc_id')}_{hit.get('chunk_index')}"
+            chunk_text = hit.get("chunk_text", "") or ""
+            text_terms = set(self._normalize_terms(chunk_text))
+            title_terms = set(self._normalize_terms(title))
+            support_overlap = len((title_terms | text_terms) & query_terms)
+            focus_overlap = len(text_terms & focus_terms)
+            family_rows[family_key].append({
+                "hit": hit,
+                "family_key": family_key,
+                "title": title,
+                "base_score": _safe_numeric(
+                    hit.get("final_rank_score"),
+                    _safe_numeric(hit.get("cross_encoder_score"), _safe_numeric(hit.get("hybrid_weighted_score"), _safe_numeric(hit.get("rrf_score"), _safe_numeric(hit.get("score"), 0.0)))),
+                ),
+                "support_overlap": support_overlap,
+                "focus_overlap": focus_overlap,
+            })
+
+        family_rankings: List[Tuple[float, str]] = []
+        for family_key, rows in family_rows.items():
+            ordered = sorted(rows, key=lambda row: row["base_score"], reverse=True)
+            best = ordered[0]["base_score"]
+            mean_top = sum(row["base_score"] for row in ordered[:2]) / max(1, min(2, len(ordered)))
+            support_hits = sum(1 for row in ordered if row["support_overlap"] > 0 or row["focus_overlap"] > 0)
+            family_rankings.append((
+                (0.72 * best) + (0.28 * mean_top) + (0.08 * min(3, support_hits)),
+                family_key,
+            ))
+
+        family_rankings.sort(reverse=True)
+        family_quota = max(2, min(fetch_k, max(3, fetch_k // 3)))
+        selected_hits: List[Dict[str, Any]] = []
+        selected_keys: Set[tuple] = set()
+
+        for _, family_key in family_rankings[:family_quota]:
+            rows = sorted(
+                family_rows[family_key],
+                key=lambda row: (
+                    row["focus_overlap"],
+                    row["support_overlap"],
+                    row["base_score"],
+                ),
+                reverse=True,
+            )
+            family_taken = 0
+            anchor_index = None
+            for row in rows:
+                hit = dict(row["hit"])
+                key = (hit.get("doc_id"), hit.get("chunk_index"))
+                if key in selected_keys:
+                    continue
+                if family_taken == 0:
+                    hit["ragflow_family_role"] = "anchor"
+                    selected_hits.append(hit)
+                    selected_keys.add(key)
+                    family_taken += 1
+                    anchor_index = hit.get("chunk_index")
+                    continue
+                if family_taken >= 2:
+                    break
+                if anchor_index is not None and hit.get("chunk_index") is not None:
+                    if abs(int(hit.get("chunk_index")) - int(anchor_index)) > 1 and row["focus_overlap"] == 0:
+                        continue
+                hit["ragflow_family_role"] = "companion"
+                selected_hits.append(hit)
+                selected_keys.add(key)
+                family_taken += 1
+
+        for hit in reranked_hits:
+            if len(selected_hits) >= fetch_k:
+                break
+            key = (hit.get("doc_id"), hit.get("chunk_index"))
+            if key in selected_keys:
+                continue
+            fallback = dict(hit)
+            fallback["ragflow_family_role"] = fallback.get("ragflow_family_role") or "tail"
+            selected_hits.append(fallback)
+            selected_keys.add(key)
+
+        return selected_hits[:fetch_k]
+
     def _collect_candidates(self, query_variants: List[str], fetch_k: int) -> List[Dict[str, Any]]:
         dense_hits: List[Dict[str, Any]] = []
         sparse_hits: List[Dict[str, Any]] = []
@@ -341,15 +498,12 @@ class HybridSearchCoordinator:
                     hit["query_variant"] = variant
                     sparse_hits.append(hit)
 
-        fused_hits = reciprocal_rank_fusion(dense_hits, sparse_hits)
-
-        for hit in fused_hits:
-            title = hit.get("title") or ""
-            if title:
-                hit["rrf_score"] = hit.get("rrf_score", 0.0) + (0.04 * self._title_overlap(query_variants[0], title))
-
-        fused_hits.sort(key=lambda x: x.get("rrf_score", 0.0), reverse=True)
-        return fused_hits[:fetch_k]
+        return self._ragflow_weighted_fusion(
+            query_variants[0],
+            dense_hits,
+            sparse_hits,
+            fetch_k=fetch_k,
+        )
 
     def _raw_lexical_search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
         if not self.pg_conn:
@@ -1846,12 +2000,15 @@ class HybridSearchCoordinator:
             reverse=True
         )
 
-        # 4. Graph Expansion with bounded contribution tracking.
-        pre_graph_candidates = reranked_hits[: max(top_k * 3, 10)]
+        # 4. RAGFlow-style family regrouping before graph/symbolic enrichment.
+        family_pool = self._build_ragflow_family_pool(query, reranked_hits, fetch_k=max(top_k * 3, 12))
+
+        # 5. Graph Expansion with bounded contribution tracking.
+        pre_graph_candidates = family_pool[: max(top_k * 3, 10)]
         grounded_candidates = self._graph_expansion(pre_graph_candidates, query=query)
         graph_expansion_enriched = sum(1 for hit in grounded_candidates if hit.get("graph_context"))
 
-        # 5. Selective Symbolic Graph Retrieval.
+        # 6. Selective Symbolic Graph Retrieval.
         symbolic_triggered = self._should_use_symbolic_search(query, query_graph, reranked_hits)
         deep_hits: List[Dict[str, Any]] = []
         if symbolic_triggered:
@@ -1873,7 +2030,7 @@ class HybridSearchCoordinator:
         )
         pre_source_mix = dict(Counter(self._infer_source_type(hit) for hit in combined_candidates))
 
-        # 6. Role-aware final evidence selection.
+        # 7. Role-aware final evidence selection on top of family-regrouped candidates.
         selected_hits, role_debug = self._select_role_aware_candidates(
             query=query,
             candidates=combined_candidates,
@@ -1886,6 +2043,7 @@ class HybridSearchCoordinator:
             **self.last_search_debug,
             "first_stage_candidates": first_stage_count,
             "reranked_candidates": len(reranked_hits),
+            "family_pool_count": len(family_pool),
             "pre_pack_count": len(combined_candidates),
             "graph_expansion_added": 0,
             "graph_expansion_enriched": graph_expansion_enriched,

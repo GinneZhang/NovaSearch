@@ -240,26 +240,38 @@ curl -X POST "http://localhost:8000/ask_vision" \
 # 完整测试套件
 pytest tests/ -v --ignore=tests/benchmark_rag.py --ignore=tests/load_test.py
 
-# 基准测试（基于 Ragas）
+# 基准测试（自写指标）
 python tests/benchmark_rag.py
 
-# HotpotQA 100-sample（generation contexts -> Ragas）
-BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=generation python tests/benchmark_rag.py
+# HotpotQA 100-sample
+BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation python tests/benchmark_rag.py
 
-# HotpotQA 100-sample（retrieval contexts -> Ragas）
-BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=retrieval python tests/benchmark_rag.py
+# MuSiQue 100-sample
+BENCHMARK_NAME=musique BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation python tests/benchmark_rag.py
 
-# SQuAD 100-sample（generation contexts -> Ragas）
-BENCHMARK_NAME=squad BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=generation python tests/benchmark_rag.py
-
-# SQuAD 2.0 100-sample（retrieval contexts -> Ragas）
-BENCHMARK_NAME=squad_v2 BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=retrieval python tests/benchmark_rag.py
+# 2WikiMultiHopQA 100-sample（可选实验轨）
+BENCHMARK_NAME=two_wiki BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation python tests/benchmark_rag.py
 
 # 负载测试
 python tests/load_test.py
 ```
 
-Benchmark runner 现在已经切换为以 Ragas 为主的评测框架。正式指标由 Ragas 给出，AsterScope 自己的 chain/debug 字段继续作为诊断旁路保留。详见 [docs/ragas_evaluation_migration.md](docs/ragas_evaluation_migration.md)。
+Benchmark runner 现在使用更快的自写指标作为正式评测结果：
+
+- `Answer EM`
+- `Answer F1`
+- `Hit Rate @ 5`
+- `MRR @ 5`
+- `Noise Reduction Ratio`
+- `Cost Savings`
+
+AsterScope 自己的 chain/debug 字段继续作为诊断旁路保留。详见 [docs/ragas_evaluation_migration.md](docs/ragas_evaluation_migration.md)。
+
+当前推荐的对外主测试轨：
+
+- `HotpotQA`：主多跳基准
+- `MuSiQue`：第二主多跳基准
+- `2WikiMultiHopQA`：可选实验轨，不默认进入公开报告
 
 ---
 

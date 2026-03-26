@@ -11,13 +11,6 @@ import string
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from datasets import load_dataset
-try:
-    import pandas as pd
-except ImportError:  # pragma: no cover
-    pd = None
-
-
 LoadDatasetFn = Callable[..., Any]
 
 
@@ -39,7 +32,19 @@ def _to_list(value: Any) -> List[Any]:
     return [value]
 
 
+def _coalesce_sequence(*values: Any) -> List[Any]:
+    for value in values:
+        items = _to_list(value)
+        if items:
+            return items
+    return []
+
+
 def _load_remote_parquet_rows(url: str, sample_size: int, seed: int) -> List[Dict[str, Any]]:
+    try:
+        import pandas as pd
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("pandas is required for parquet-backed benchmark adapters.") from exc
     if pd is None:
         raise RuntimeError("pandas is required for parquet-backed benchmark adapters.")
     frame = pd.read_parquet(url)
@@ -86,6 +91,11 @@ def normalize_benchmark_name(name: Optional[str]) -> str:
     aliases = {
         "hotpot": "hotpotqa",
         "hotpot_qa": "hotpotqa",
+        "2wiki": "two_wiki",
+        "2wikimultihopqa": "two_wiki",
+        "2wiki_multihopqa": "two_wiki",
+        "twowiki": "two_wiki",
+        "two_wiki_multihopqa": "two_wiki",
         "musique_ans": "musique",
         "mu_sique": "musique",
         "squad2": "squad_v2",
@@ -106,6 +116,8 @@ def default_trace_path(benchmark_name: str) -> str:
 def default_split_for_benchmark(benchmark_name: str) -> str:
     normalized = normalize_benchmark_name(benchmark_name)
     if normalized == "hotpotqa":
+        return "validation"
+    if normalized == "two_wiki":
         return "validation"
     if normalized == "squad":
         return "validation"
@@ -199,23 +211,29 @@ def load_benchmark_bundle(
     split: Optional[str] = None,
     seed: int = 42,
     cache_dir: Optional[str] = None,
-    load_dataset_fn: LoadDatasetFn = load_dataset,
+    load_dataset_fn: Optional[LoadDatasetFn] = None,
 ) -> BenchmarkBundle:
+    use_remote_source = load_dataset_fn is None
+    if load_dataset_fn is None:
+        from datasets import load_dataset as _load_dataset  # lazy import to avoid heavy startup cost
+        load_dataset_fn = _load_dataset
     normalized = normalize_benchmark_name(benchmark_name)
     resolved_split = split or default_split_for_benchmark(normalized)
     resolved_cache_dir = cache_dir or os.getenv("BENCHMARK_DATASET_CACHE_DIR") or os.getenv("HF_DATASETS_CACHE") or "/tmp/hf_cache/datasets"
     if normalized == "hotpotqa":
-        return _load_hotpotqa_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn)
+        return _load_hotpotqa_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn, use_remote_source)
+    if normalized == "two_wiki":
+        return _load_two_wiki_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn, use_remote_source)
     if normalized == "squad":
         return _load_squad_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn)
     if normalized == "squad_v2":
         return _load_squad_v2_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn)
     if normalized == "musique":
-        return _load_musique_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn)
+        return _load_musique_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn, use_remote_source)
     if normalized == "asqa":
-        return _load_asqa_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn)
+        return _load_asqa_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn, use_remote_source)
     raise ValueError(
-        f"Unsupported benchmark '{benchmark_name}'. Supported benchmarks: hotpotqa, musique, asqa, squad, squad_v2"
+        f"Unsupported benchmark '{benchmark_name}'. Supported benchmarks: hotpotqa, two_wiki, musique, asqa, squad, squad_v2"
     )
 
 
@@ -225,8 +243,9 @@ def _load_hotpotqa_bundle(
     seed: int,
     cache_dir: str,
     load_dataset_fn: LoadDatasetFn,
+    use_remote_source: bool,
 ) -> BenchmarkBundle:
-    if load_dataset_fn is load_dataset:
+    if use_remote_source:
         parquet_split = "validation" if split == "validation" else split
         subset = _load_remote_parquet_rows(
             f"https://huggingface.co/datasets/hotpotqa/hotpot_qa/resolve/main/distractor/{parquet_split}-00000-of-00001.parquet",
@@ -287,6 +306,97 @@ def _load_hotpotqa_bundle(
         total_raw_tokens=total_raw_tokens,
         notes=[
             "HotpotQA retains supporting-title retrieval metrics because the dataset exposes page-level supervision.",
+        ],
+    )
+
+
+def _load_two_wiki_bundle(
+    sample_size: int,
+    split: str,
+    seed: int,
+    cache_dir: str,
+    load_dataset_fn: LoadDatasetFn,
+    use_remote_source: bool,
+) -> BenchmarkBundle:
+    if use_remote_source:
+        parquet_split = "validation" if split == "validation" else split
+        subset = _load_remote_parquet_rows(
+            f"https://huggingface.co/datasets/framolfese/2WikiMultihopQA/resolve/main/data/{parquet_split}-00000-of-00001.parquet",
+            sample_size=sample_size,
+            seed=seed,
+        )
+    else:
+        ds = load_dataset_fn("framolfese/2WikiMultihopQA", split=split, streaming=False, cache_dir=cache_dir)
+        subset = ds.shuffle(seed=seed).select(range(sample_size))
+
+    cases: List[BenchmarkCase] = []
+    page_corpus: Dict[str, BenchmarkPage] = {}
+    total_raw_tokens = 0.0
+
+    for idx, item in enumerate(subset):
+        context = item.get("context") or {}
+        titles = _coalesce_sequence(context.get("title"), context.get("titles"))
+        sentences = _coalesce_sequence(context.get("sentences"), context.get("paragraphs"))
+        if not titles:
+            continue
+
+        pages: List[BenchmarkPage] = []
+        doc_text_parts: List[str] = []
+
+        for page_idx, title in enumerate(titles):
+            raw_sentences = sentences[page_idx] if page_idx < len(sentences) else []
+            if isinstance(raw_sentences, list):
+                page_text = " ".join(str(s) for s in raw_sentences).strip()
+            else:
+                page_text = str(raw_sentences).strip() if raw_sentences is not None else ""
+            full_page_text = f"{title}\n{page_text}".strip()
+            ref_id = f"2wiki::{title}"
+            page = BenchmarkPage(
+                ref_id=ref_id,
+                title=str(title),
+                text=full_page_text,
+                section=f"2Wiki Benchmark {idx}",
+                metadata={"dataset": "two_wiki", "page_index": page_idx},
+            )
+            pages.append(page)
+            doc_text_parts.append(full_page_text)
+            page_corpus.setdefault(ref_id, page)
+
+        if not pages:
+            continue
+
+        supporting_facts = item.get("supporting_facts") or {}
+        expected_titles = list(_coalesce_sequence(supporting_facts.get("title"), supporting_facts.get("titles")))
+        answer = item.get("answer") or item.get("answers") or ""
+        expected_answers = [str(answer)] if not isinstance(answer, list) else [str(a) for a in answer if str(a).strip()]
+        if not expected_answers:
+            continue
+
+        doc_text = "\n\n".join(doc_text_parts).strip()
+        total_raw_tokens += len(doc_text.split()) * 1.3
+        cases.append(
+            BenchmarkCase(
+                idx=idx,
+                query=str(item.get("question") or item.get("query") or "").strip(),
+                expected_answers=expected_answers,
+                expected_titles=expected_titles,
+                pages=pages,
+                metadata={"dataset": "two_wiki", "id": item.get("_id") or item.get("id")},
+            )
+        )
+
+    return BenchmarkBundle(
+        name="two_wiki",
+        display_name="2WikiMultiHopQA",
+        split=split,
+        sample_size=len(cases),
+        retrieval_metric_label="Supporting Title Hit/MRR",
+        answer_metric_label="Answer EM/F1",
+        cases=cases,
+        unique_pages=list(page_corpus.values()),
+        total_raw_tokens=total_raw_tokens,
+        notes=[
+            "2WikiMultiHopQA uses Hotpot-style page supervision for retrieval hit metrics.",
         ],
     )
 
@@ -401,8 +511,9 @@ def _load_musique_bundle(
     seed: int,
     cache_dir: str,
     load_dataset_fn: LoadDatasetFn,
+    use_remote_source: bool,
 ) -> BenchmarkBundle:
-    if load_dataset_fn is load_dataset:
+    if use_remote_source:
         subset = _load_remote_parquet_rows(
             "https://huggingface.co/api/datasets/cmriat/musique/parquet/default/validation/0.parquet",
             sample_size=sample_size,
@@ -507,8 +618,9 @@ def _load_asqa_bundle(
     seed: int,
     cache_dir: str,
     load_dataset_fn: LoadDatasetFn,
+    use_remote_source: bool,
 ) -> BenchmarkBundle:
-    if load_dataset_fn is load_dataset:
+    if use_remote_source:
         subset = _load_remote_parquet_rows(
             "https://huggingface.co/api/datasets/din0s/asqa/parquet/default/dev/0.parquet",
             sample_size=sample_size,

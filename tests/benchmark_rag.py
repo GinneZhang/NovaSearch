@@ -3,24 +3,27 @@ Comprehensive benchmark runner for AsterScope.
 
 Supports:
 - HotpotQA (page-supervised, multi-hop)
-- Natural Questions via BeIR/NQ (corpus + queries + qrels)
+- MuSiQue
+- SQuAD / SQuAD 2.0
+- ASQA
 """
 
 import asyncio
 import json
 import logging
 import os
+import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-import httpx
 from dotenv import load_dotenv
-from tqdm import tqdm
 
 try:
     from tests.benchmark_support import (
         BenchmarkBundle,
         BenchmarkCase,
+        calc_hit_rate_at_k,
+        calc_mrr_at_k,
         default_split_for_benchmark,
         default_trace_path,
         exact_match_score,
@@ -33,6 +36,8 @@ except ImportError:
     from benchmark_support import (
         BenchmarkBundle,
         BenchmarkCase,
+        calc_hit_rate_at_k,
+        calc_mrr_at_k,
         default_split_for_benchmark,
         default_trace_path,
         exact_match_score,
@@ -42,18 +47,9 @@ except ImportError:
         token_f1_score,
     )
 
-try:
-    from tests.ragas_support import (
-        RagasEvaluationResult,
-        RagasRunner,
-        normalize_context_mode,
-    )
-except ImportError:
-    from ragas_support import (
-        RagasEvaluationResult,
-        RagasRunner,
-        normalize_context_mode,
-    )
+if TYPE_CHECKING:
+    import httpx
+    from tqdm import tqdm
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -61,15 +57,30 @@ logger = logging.getLogger(__name__)
 # Reduce httpx/openai noise
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-try:
-    import psycopg2
-except ImportError:
-    psycopg2 = None
+def _get_httpx():
+    import httpx
+    return httpx
 
-try:
-    from neo4j import GraphDatabase
-except ImportError:
-    GraphDatabase = None
+
+def _get_tqdm():
+    from tqdm import tqdm
+    return tqdm
+
+
+def _get_psycopg2():
+    try:
+        import psycopg2
+    except ImportError:
+        return None
+    return psycopg2
+
+
+def _get_graph_database():
+    try:
+        from neo4j import GraphDatabase
+    except ImportError:
+        return None
+    return GraphDatabase
 
 
 def _estimate_context_tokens(contexts: List[str]) -> float:
@@ -147,8 +158,79 @@ def _benchmark_bool(name: str, default: bool) -> bool:
     return raw.lower() in {"1", "true", "yes"}
 
 
+def _benchmark_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_query_concurrency(benchmark_name: str) -> int:
+    benchmark_specific = os.getenv(f"{benchmark_name.upper()}_QUERY_CONCURRENCY")
+    if benchmark_specific is not None:
+        try:
+            return int(benchmark_specific)
+        except (TypeError, ValueError):
+            pass
+    return _benchmark_int(
+        "BENCHMARK_QUERY_CONCURRENCY",
+        _benchmark_int("HOTPOT_QUERY_CONCURRENCY", 8),
+    )
+
+
+def _select_runtime_warmup_queries(benchmark: BenchmarkBundle, max_queries: int) -> List[str]:
+    if max_queries <= 0:
+        return []
+    warmups: List[str] = []
+    seen = set()
+    for case in benchmark.cases:
+        query = (case.query or "").strip()
+        if not query or query in seen:
+            continue
+        warmups.append(query)
+        seen.add(query)
+        if len(warmups) >= max_queries:
+            break
+    return warmups
+
+
+def _ensure_benchmark_generation_defaults() -> None:
+    """
+    Benchmark runs need the short-answer generation path enabled; otherwise the
+    agent intentionally returns retrieval-only completion markers and EM/F1
+    collapse to zero even when retrieval is correct.
+    """
+    if os.getenv("ASTERSCOPE_BENCHMARK_GENERATE_ANSWER") is None:
+        os.environ["ASTERSCOPE_BENCHMARK_GENERATE_ANSWER"] = os.getenv(
+            "NOVASEARCH_BENCHMARK_GENERATE_ANSWER",
+            "true",
+        )
+    if os.getenv("NOVASEARCH_BENCHMARK_GENERATE_ANSWER") is None:
+        os.environ["NOVASEARCH_BENCHMARK_GENERATE_ANSWER"] = os.environ[
+            "ASTERSCOPE_BENCHMARK_GENERATE_ANSWER"
+        ]
+
+
+def _prefer_warm_runtime() -> None:
+    """
+    Reuse an already-running benchmark service when an endpoint is available.
+    This avoids repeated in-process cold starts during iteration.
+    """
+    if os.getenv("BENCHMARK_INPROCESS") is not None:
+        return
+    if os.getenv("BENCHMARK_WARM_RUNTIME", "true").lower() not in {"1", "true", "yes"}:
+        return
+    if os.getenv("ASTERSCOPE_URL") or os.getenv("NOVASEARCH_URL"):
+        os.environ["BENCHMARK_INPROCESS"] = "false"
+
+
 def reset_benchmark_stores():
     """Best-effort cleanup so repeated benchmark runs don't stack stale state."""
+    psycopg2 = _get_psycopg2()
+    GraphDatabase = _get_graph_database()
     graph_enabled = (
         os.getenv("ENABLE_GRAPH_INGESTION", "false").lower() in {"1", "true", "yes"}
         or os.getenv("ENABLE_GRAPH_RETRIEVAL", "false").lower() in {"1", "true", "yes"}
@@ -352,7 +434,7 @@ async def evaluate_query(
 
 
 async def verify_runtime_preflight(
-    client: httpx.AsyncClient,
+    client: Any,
     base_url: str,
     headers: Dict[str, str],
     canary_query: str,
@@ -421,16 +503,29 @@ async def verify_runtime_preflight(
     }
 
 
+async def warm_runtime_queries(
+    client: Any,
+    base_url: str,
+    headers: Dict[str, str],
+    queries: List[str],
+) -> None:
+    for query in queries:
+        resp = await client.post(
+            f"{base_url}/ask",
+            json={"query": query, "top_k": 5},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        # Drain the stream text so model/reranker/memory initialization completes before timing.
+        _ = resp.text
+
+
 def build_summary_payload(
     benchmark: BenchmarkBundle,
     query_results: List[Dict[str, Any]],
-    ragas_result: RagasEvaluationResult,
     total_context_tokens: float,
     ingest_duration: float,
     query_duration: float,
-    context_mode: str,
-    ragas_model: Optional[str],
-    ragas_embedding_model: Optional[str],
     runtime_preflight: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     n = len(query_results)
@@ -514,6 +609,14 @@ def build_summary_payload(
         token_f1_score(r.get("scored_answer", "") or r.get("answer", ""), r.get("expected_answers") or [])
         for r in query_results
     ]) or 0.0
+    hit_rate_at_5 = _mean([
+        float(calc_hit_rate_at_k(r.get("retrieval_contexts", []), r.get("expected_titles", []), k=5))
+        for r in query_results
+    ]) or 0.0
+    mrr_at_5 = _mean([
+        calc_mrr_at_k(r.get("retrieval_contexts", []), r.get("expected_titles", []), k=5)
+        for r in query_results
+    ]) or 0.0
     avg_planner_confirmed_generation_count = _mean(
         [float(r.get("planner_confirmed_generation_count", 0)) for r in query_results]
     ) or 0.0
@@ -560,15 +663,10 @@ def build_summary_payload(
         "runtime_preflight": runtime_preflight or {},
         "sample_size": n,
         "unique_pages_ingested": len(benchmark.unique_pages),
-        "ragas_context_mode": normalize_context_mode(context_mode),
-        "ragas_metrics": ragas_result.metrics_summary,
-        "ragas_metric_modes": ragas_result.metrics_applied,
-        "ragas_metric_skips": ragas_result.metrics_skipped,
-        "ragas_eval_sample_count": len(ragas_result.sample_rows),
-        "ragas_model": ragas_model,
-        "ragas_embedding_model": ragas_embedding_model,
         "cost_savings_pct": savings,
         "noise_reduction_ratio": ratio,
+        "hit_rate_at_5": hit_rate_at_5,
+        "mrr_at_5": mrr_at_5,
         "second_hop_trigger_rate": second_hop_trigger_rate,
         "avg_first_hop_candidates": avg_first_hop_candidates,
         "avg_merged_candidates": avg_merged_candidates,
@@ -621,26 +719,26 @@ def build_summary_payload(
         "graph_retrieval_enabled": os.getenv("ENABLE_GRAPH_RETRIEVAL", "false").lower() in {"1", "true", "yes"},
         "vision_retriever_enabled": os.getenv("ENABLE_VISION_RETRIEVER", "true").lower() in {"1", "true", "yes"},
         "text_vision_indexing_enabled": os.getenv("ENABLE_TEXT_VISION_INDEXING", "true").lower() in {"1", "true", "yes"},
-        "sampled_ragas_cases": [
+        "samples": [
             {
-                "query": row["query"],
-                "answer": row["answer"],
-                "contexts": row.get("ragas_contexts", row.get("generation_contexts", [])),
-                "ground_truth": row.get("ragas_ground_truth"),
-                "reference_contexts": row.get("ragas_reference_contexts", row.get("reference_contexts", [])),
-                "ragas_scores": row.get("ragas_scores", {}),
-                "ragas_metric_modes": row.get("ragas_metric_modes", {}),
-                "ragas_metric_skips": row.get("ragas_metric_skips", {}),
-                "debug_metrics": row.get("debug_metrics", {}),
+                "query": row.get("query"),
+                "expected_answers": row.get("expected_answers"),
+                "answer": row.get("answer"),
+                "scored_answer": row.get("scored_answer"),
+                "supporting_titles": [
+                    source.get("title")
+                    for source in (row.get("supporting_sources_raw") or [])
+                    if isinstance(source, dict) and source.get("title")
+                ][:5],
             }
-            for row in ragas_result.sample_rows
+            for row in query_results[: min(5, len(query_results))]
         ],
     }
 
 
 def print_summary(summary: Dict[str, Any]):
     print("\n" + "=" * 60)
-    print("KPI DIMENSION 1: RAGAS METRICS")
+    print("KPI DIMENSION 1: TASK METRICS")
     print("=" * 60)
     print(f"Dataset: {summary['benchmark_display_name']} ({summary['benchmark_split']} split)")
     print(f"Sample Size: {summary['sample_size']} Questions / {summary['unique_pages_ingested']} Ingested Reference Pages")
@@ -654,19 +752,10 @@ def print_summary(summary: Dict[str, Any]):
             f"candidate_chains={summary['runtime_preflight'].get('candidate_chains')}, "
             f"selected_chains={summary['runtime_preflight'].get('selected_chains')}"
         )
-    print(f"Ragas Context Mode: {summary['ragas_context_mode']}")
-    print(f"Ragas Model: {summary['ragas_model']}")
-    print(f"Ragas Embedding Model: {summary['ragas_embedding_model']}")
-    print(f"Ragas Metric Modes: {summary['ragas_metric_modes']}")
-    if summary.get("ragas_metric_skips"):
-        print(f"Ragas Metric Skips: {summary['ragas_metric_skips']}")
+    print(f"Hit Rate @ 5: {summary['hit_rate_at_5']:.3f}")
+    print(f"MRR @ 5: {summary['mrr_at_5']:.3f}")
     print(f"Answer EM: {summary['answer_em']:.3f}")
     print(f"Answer F1: {summary['answer_f1']:.3f}")
-    print(f"| Metric | Value |")
-    print(f"|---|---|")
-    for metric_name, metric_value in summary["ragas_metrics"].items():
-        rendered = "not available" if metric_value is None else f"{metric_value:.3f}"
-        print(f"| {metric_name} | {rendered} |")
 
     print("\n" + "=" * 60)
     print("KPI DIMENSION 2: ASTERSCOPE DEBUG SUMMARY")
@@ -722,6 +811,8 @@ def print_summary(summary: Dict[str, Any]):
 
 
 async def main_async():
+    _ensure_benchmark_generation_defaults()
+    _prefer_warm_runtime()
     base_url = os.getenv("ASTERSCOPE_URL", os.getenv("NOVASEARCH_URL", "http://127.0.0.1:8000"))
     api_key = os.getenv("API_KEY", "")
     headers = {"X-API-KEY": api_key}
@@ -730,15 +821,15 @@ async def main_async():
     benchmark_name = normalize_benchmark_name(os.getenv("BENCHMARK_NAME", "hotpotqa"))
     benchmark_split = os.getenv("BENCHMARK_SPLIT", default_split_for_benchmark(benchmark_name))
     sample_size = resolve_sample_size(benchmark_name)
-    ragas_context_mode = normalize_context_mode(os.getenv("BENCHMARK_CONTEXT_MODE", "generation"))
+    httpx = _get_httpx()
+    tqdm = _get_tqdm()
     trace_path = os.getenv("KPI_TRACE_PATH", default_trace_path(benchmark_name))
-    skip_ragas = _benchmark_bool("BENCHMARK_SKIP_RAGAS", False)
     reset_stores = _benchmark_bool(
         "BENCHMARK_RESET_STORES",
         _benchmark_bool("HOTPOT_RESET_STORES", True) if benchmark_name == "hotpotqa" else True,
     )
 
-    async def _run_benchmark_flow(client: httpx.AsyncClient, resolved_base_url: str):
+    async def _run_benchmark_flow(client: Any, resolved_base_url: str):
         print("\n" + "=" * 60)
         print(f"KPI DIMENSION: BENCHMARK RUN ({benchmark_name})")
         print("=" * 60)
@@ -790,7 +881,9 @@ async def main_async():
             print("\nWaiting 5 seconds for background graph indexing to settle...")
             await asyncio.sleep(5)
 
-        canary_query = benchmark.cases[0].query if benchmark.cases else "What is this document about?"
+        warmup_count = _benchmark_int("BENCHMARK_WARMUP_QUERIES", 2)
+        warmup_queries = _select_runtime_warmup_queries(benchmark, warmup_count)
+        canary_query = warmup_queries[0] if warmup_queries else "What is this document about?"
         print("\nRunning runtime preflight /ask verification...")
         runtime_preflight = await verify_runtime_preflight(
             client=client,
@@ -807,8 +900,19 @@ async def main_async():
             f"selected_chains={runtime_preflight['selected_chains']}"
         )
 
+        extra_warmups = warmup_queries[1:]
+        if extra_warmups:
+            print(f"Running explicit warmup queries ({len(extra_warmups)})...")
+            await warm_runtime_queries(
+                client=client,
+                base_url=resolved_base_url,
+                headers=headers,
+                queries=extra_warmups,
+            )
+            print("Warmup complete.")
+
         print(f"\nStarting ASYNC query evaluation phase ({benchmark.sample_size} queries)...")
-        query_concurrency = int(os.getenv("BENCHMARK_QUERY_CONCURRENCY", os.getenv("HOTPOT_QUERY_CONCURRENCY", "5")))
+        query_concurrency = _resolve_query_concurrency(benchmark_name)
         query_semaphore = asyncio.Semaphore(query_concurrency)
         query_results: List[Dict[str, Any]] = []
         query_start = time.perf_counter()
@@ -829,35 +933,16 @@ async def main_async():
             await asyncio.gather(*tasks)
         query_duration = time.perf_counter() - query_start
 
-        ragas_runner = RagasRunner()
-        if skip_ragas:
-            print("\nSkipping Ragas evaluation for this run (BENCHMARK_SKIP_RAGAS=true).")
-            ragas_result = RagasEvaluationResult(
-                sample_rows=list(query_results),
-                metrics_summary={metric_name: None for metric_name in ragas_runner.selected_metrics},
-                metrics_applied={},
-                metrics_skipped={metric_name: "skipped_for_report_mode" for metric_name in ragas_runner.selected_metrics},
-            )
-        else:
-            print("\nRunning Ragas evaluation...")
-            ragas_result = await ragas_runner.evaluate_rows(query_results, context_mode=ragas_context_mode)
         total_context_tokens = sum(
-            float(
-                row["generation_token_estimate"]
-                if ragas_context_mode == "generation" else row["retrieval_token_estimate"]
-            )
+            float(row["generation_token_estimate"])
             for row in query_results
         )
         summary = build_summary_payload(
             benchmark,
             query_results,
-            ragas_result=ragas_result,
             total_context_tokens=total_context_tokens,
             ingest_duration=ingest_duration,
             query_duration=query_duration,
-            context_mode=ragas_context_mode,
-            ragas_model=ragas_runner.model,
-            ragas_embedding_model=ragas_runner.embedding_model,
             runtime_preflight=runtime_preflight,
         )
         print_summary(summary)
@@ -868,7 +953,13 @@ async def main_async():
 
     if inprocess_mode:
         print("Running benchmark in-process via ASGITransport using current workspace code.")
-        from api.main import app
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        try:
+            from api.main import app
+        except ImportError:
+            from main import app
 
         base_url = "http://testserver"
         async with app.router.lifespan_context(app):

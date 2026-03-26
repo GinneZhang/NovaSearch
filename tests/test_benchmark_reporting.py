@@ -1,13 +1,16 @@
 """
-Regression tests for Ragas benchmark summary reporting and debug traces.
+Regression tests for custom benchmark summary reporting and debug traces.
 """
 
-from tests.benchmark_rag import build_summary_payload
-from tests.benchmark_support import BenchmarkBundle
-from tests.ragas_support import RagasEvaluationResult
+from tests.benchmark_rag import (
+    build_summary_payload,
+    _resolve_query_concurrency,
+    _select_runtime_warmup_queries,
+)
+from tests.benchmark_support import BenchmarkBundle, BenchmarkCase, BenchmarkPage
 
 
-def test_build_summary_payload_reports_ragas_and_preserves_debug_metrics():
+def test_build_summary_payload_reports_custom_metrics_and_preserves_debug_metrics():
     bundle = BenchmarkBundle(
         name="hotpotqa",
         display_name="HotpotQA",
@@ -83,67 +86,18 @@ def test_build_summary_payload_reports_ragas_and_preserves_debug_metrics():
         }
     ]
 
-    ragas_result = RagasEvaluationResult(
-        sample_rows=[
-            {
-                **query_results[0],
-                "ragas_contexts": query_results[0]["generation_contexts"],
-                "ragas_ground_truth": "Chief Legal Officer",
-                "ragas_reference_contexts": query_results[0]["reference_contexts"],
-                "ragas_scores": {
-                    "context_precision": 0.8,
-                    "context_recall": 0.9,
-                    "context_entities_recall": 0.7,
-                    "faithfulness": 0.95,
-                    "answer_relevancy": 0.88,
-                    "noise_sensitivity": 0.2,
-                },
-                "ragas_metric_modes": {
-                    "context_precision": "llm_reference",
-                    "context_recall": "llm_reference",
-                    "context_entities_recall": "llm_reference",
-                    "faithfulness": "llm",
-                    "answer_relevancy": "llm_embeddings",
-                    "noise_sensitivity": "llm_reference",
-                },
-                "ragas_metric_skips": {},
-            }
-        ],
-        metrics_summary={
-            "context_precision": 0.8,
-            "context_recall": 0.9,
-            "context_entities_recall": 0.7,
-            "faithfulness": 0.95,
-            "answer_relevancy": 0.88,
-            "noise_sensitivity": 0.2,
-        },
-        metrics_applied={
-            "context_precision": "llm_reference",
-            "context_recall": "llm_reference",
-            "context_entities_recall": "llm_reference",
-            "faithfulness": "llm",
-            "answer_relevancy": "llm_embeddings",
-            "noise_sensitivity": "llm_reference",
-        },
-        metrics_skipped={},
-    )
-
     summary = build_summary_payload(
         benchmark=bundle,
         query_results=query_results,
-        ragas_result=ragas_result,
         total_context_tokens=20.0,
         ingest_duration=1.2,
         query_duration=2.4,
-        context_mode="generation",
-        ragas_model="gpt-4.1-mini",
-        ragas_embedding_model="text-embedding-3-small",
     )
 
-    assert summary["ragas_context_mode"] == "generation"
-    assert summary["ragas_metrics"]["context_precision"] == 0.8
-    assert summary["ragas_metrics"]["context_entities_recall"] == 0.7
-    assert summary["ragas_metric_modes"]["answer_relevancy"] == "llm_embeddings"
+    assert summary["hit_rate_at_5"] == 1.0
+    assert summary["mrr_at_5"] == 1.0
+    assert summary["answer_em"] == 1.0
+    assert summary["answer_f1"] == 1.0
     assert summary["avg_pre_pack_count"] == 14.0
     assert summary["avg_post_pack_count"] == 5.0
     assert summary["avg_candidate_chains"] == 4.0
@@ -157,7 +111,6 @@ def test_build_summary_payload_reports_ragas_and_preserves_debug_metrics():
     assert summary["source_type_mix_totals"] == {"dense": 1, "lexical": 1}
     assert summary["evidence_role_mix_totals"] == {"answer": 1, "bridge": 1}
     assert summary["final_context_chain_mix_totals"] == {"chain_1": 2, "no_chain": 1}
-    assert summary["sampled_ragas_cases"][0]["ragas_scores"]["faithfulness"] == 0.95
 
 
 def test_build_summary_payload_scores_scored_answer_when_present():
@@ -205,24 +158,63 @@ def test_build_summary_payload_scores_scored_answer_when_present():
         }
     ]
 
-    empty_ragas = RagasEvaluationResult(
-        sample_rows=[],
-        metrics_summary={},
-        metrics_applied={},
-        metrics_skipped={},
-    )
-
     summary = build_summary_payload(
         benchmark=bundle,
         query_results=query_results,
-        ragas_result=empty_ragas,
         total_context_tokens=10.0,
         ingest_duration=1.0,
         query_duration=1.0,
-        context_mode="generation",
-        ragas_model=None,
-        ragas_embedding_model=None,
     )
 
     assert summary["answer_em"] == 1.0
     assert summary["answer_f1"] == 1.0
+
+
+def test_resolve_query_concurrency_defaults_to_eight(monkeypatch):
+    monkeypatch.delenv("BENCHMARK_QUERY_CONCURRENCY", raising=False)
+    monkeypatch.delenv("HOTPOT_QUERY_CONCURRENCY", raising=False)
+    monkeypatch.delenv("HOTPOTQA_QUERY_CONCURRENCY", raising=False)
+
+    assert _resolve_query_concurrency("hotpotqa") == 8
+
+
+def test_select_runtime_warmup_queries_returns_unique_queries():
+    bundle = BenchmarkBundle(
+        name="hotpotqa",
+        display_name="HotpotQA",
+        split="validation",
+        sample_size=3,
+        retrieval_metric_label="unused",
+        answer_metric_label="unused",
+        cases=[
+                BenchmarkCase(
+                    idx=1,
+                    query="Who approves blackout exceptions?",
+                expected_answers=["Chief Legal Officer"],
+                expected_titles=["Exception Workflow"],
+                pages=[BenchmarkPage(ref_id="1", title="Exception Workflow", section="General", text="Chief Legal Officer approves blackout exceptions.")],
+            ),
+                BenchmarkCase(
+                    idx=2,
+                    query="Who approves blackout exceptions?",
+                expected_answers=["Chief Legal Officer"],
+                expected_titles=["Exception Workflow"],
+                pages=[BenchmarkPage(ref_id="2", title="Exception Workflow", section="General", text="Chief Legal Officer approves blackout exceptions.")],
+            ),
+                BenchmarkCase(
+                    idx=3,
+                    query="When does the blackout period start?",
+                expected_answers=["15 days before quarter end"],
+                expected_titles=["Policy Summary"],
+                pages=[BenchmarkPage(ref_id="3", title="Policy Summary", section="General", text="Blackout period begins 15 days before quarter end.")],
+            ),
+        ],
+        unique_pages=[],
+        total_raw_tokens=100.0,
+        notes=[],
+    )
+
+    assert _select_runtime_warmup_queries(bundle, 2) == [
+        "Who approves blackout exceptions?",
+        "When does the blackout period start?",
+    ]

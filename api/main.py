@@ -6,6 +6,7 @@ import os
 import uuid
 import logging
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
 from typing import Optional
@@ -25,13 +26,7 @@ from psycopg2.extras import Json
 
 from core.db_init import initialize_databases
 from api.schemas import QueryRequest, QueryResponse, DocumentUploadRequest, SourceChunk
-from agent.copilot_agent import EnterpriseCopilotAgent
 from core.auth import get_api_key
-from ingestion.chunking.semantic_chunker import SemanticChunker
-from ingestion.chunking.sliding_window import SlidingWindowChunker
-from ingestion.graph_build.kg_builder import KGBuilder
-from ingestion.parsers.multimodal_parser import MultimodalParser
-from retrieval.dense.vision_search import PGVectorVisionRetriever
 from PIL import Image
 import io
 
@@ -73,29 +68,80 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Copilot Agent (Singleton instance for the app lifecycle)
-try:
-    copilot_agent = EnterpriseCopilotAgent()
-    
-    chunk_strategy = os.getenv("CHUNKING_STRATEGY", "semantic").lower()
-    if chunk_strategy == "sliding_window":
-        chunker = SlidingWindowChunker()
-        logger.info("Using SlidingWindowChunker")
-    else:
-        chunker = SemanticChunker()
-        logger.info("Using SemanticChunker")
-        
-    kg_builder = KGBuilder()
-    multimodal_parser = MultimodalParser()
+copilot_agent = None
+chunker = None
+kg_builder = None
+multimodal_parser = None
+vision_retriever = None
+_copilot_agent_lock = threading.Lock()
+_chunker_lock = threading.Lock()
+_kg_builder_lock = threading.Lock()
+_multimodal_parser_lock = threading.Lock()
+_vision_retriever_lock = threading.Lock()
+
+
+def _get_chunker():
+    global chunker
+    if chunker is not None:
+        return chunker
+    with _chunker_lock:
+        if chunker is not None:
+            return chunker
+        from ingestion.chunking.semantic_chunker import SemanticChunker
+        from ingestion.chunking.sliding_window import SlidingWindowChunker
+        chunk_strategy = os.getenv("CHUNKING_STRATEGY", "semantic").lower()
+        if chunk_strategy == "sliding_window":
+            chunker = SlidingWindowChunker()
+            logger.info("Using SlidingWindowChunker")
+        else:
+            chunker = SemanticChunker()
+            logger.info("Using SemanticChunker")
+    return chunker
+
+
+def _get_kg_builder():
+    global kg_builder
+    if kg_builder is None:
+        with _kg_builder_lock:
+            if kg_builder is None:
+                from ingestion.graph_build.kg_builder import KGBuilder
+                kg_builder = KGBuilder()
+    return kg_builder
+
+
+def _get_multimodal_parser():
+    global multimodal_parser
+    if multimodal_parser is None:
+        with _multimodal_parser_lock:
+            if multimodal_parser is None:
+                from ingestion.parsers.multimodal_parser import MultimodalParser
+                multimodal_parser = MultimodalParser()
+    return multimodal_parser
+
+
+def _get_vision_retriever():
+    global vision_retriever
+    if vision_retriever is not None:
+        return vision_retriever
     enable_vision_retriever = os.getenv("ENABLE_VISION_RETRIEVER", "true").lower() in {"1", "true", "yes"}
-    vision_retriever = PGVectorVisionRetriever() if enable_vision_retriever else None
-except Exception as e:
-    logger.error("Failed to initialize tools: %s", str(e))
-    copilot_agent = None
-    chunker = None
-    kg_builder = None
-    multimodal_parser = None
-    vision_retriever = None
+    if not enable_vision_retriever:
+        return None
+    with _vision_retriever_lock:
+        if vision_retriever is not None:
+            return vision_retriever
+        from retrieval.dense.vision_search import PGVectorVisionRetriever
+        vision_retriever = PGVectorVisionRetriever()
+    return vision_retriever
+
+
+def _get_copilot_agent():
+    global copilot_agent
+    if copilot_agent is None:
+        with _copilot_agent_lock:
+            if copilot_agent is None:
+                from agent.copilot_agent import EnterpriseCopilotAgent
+                copilot_agent = EnterpriseCopilotAgent()
+    return copilot_agent
 
 
 @app.get("/health")
@@ -111,13 +157,11 @@ def ask_copilot(request: QueryRequest):
     Takes a natural language query, performs Tri-Engine Retrieval,
     and returns a grounded, hallucination-free response via a StreamingResponse.
     """
-    global copilot_agent
-    if not copilot_agent:
-        try:
-            copilot_agent = EnterpriseCopilotAgent()
-        except Exception as e:
-            logger.error(f"Error details: {str(e)}")
-            raise HTTPException(status_code=503, detail="Copilot Agent is not initialized due to missing configurations.")
+    try:
+        agent = _get_copilot_agent()
+    except Exception as e:
+        logger.error(f"Error details: {str(e)}")
+        raise HTTPException(status_code=503, detail="Copilot Agent is not initialized due to missing configurations.")
 
     session_id = request.session_id or str(uuid.uuid4())
     logger.info("Handling /ask request for query: '%s', session: '%s'", request.query, session_id)
@@ -145,7 +189,7 @@ def ask_copilot(request: QueryRequest):
         }) + "\n"
         
         try:
-            for chunk in copilot_agent.generate_response( 
+            for chunk in agent.generate_response( 
                 query=request.query, 
                 session_id=session_id, 
                 top_k=request.top_k
@@ -183,13 +227,13 @@ async def ask_vision(
     """
     Multimodal endpoints that takes an image upload and searches the common CLIP vector space.
     """
-    global vision_retriever
-    if not vision_retriever:
-        try:
-            vision_retriever = PGVectorVisionRetriever()
-        except Exception as e:
-            logger.error(f"Failed to initialize Vision Retriever: {e}")
-            raise HTTPException(status_code=503, detail="Vision services unavailable.")
+    try:
+        active_vision_retriever = _get_vision_retriever()
+    except Exception as e:
+        logger.error(f"Failed to initialize Vision Retriever: {e}")
+        raise HTTPException(status_code=503, detail="Vision services unavailable.")
+    if not active_vision_retriever:
+        raise HTTPException(status_code=503, detail="Vision services unavailable.")
             
     try:
         if not file.content_type or "image" not in file.content_type.lower():
@@ -199,10 +243,10 @@ async def ask_vision(
         pic = Image.open(io.BytesIO(file_bytes))
         
         logger.info(f"Processing image query...")
-        query_embedding = vision_retriever.embed(pic)
+        query_embedding = active_vision_retriever.embed(pic)
         
         # Search the multimodal vector space
-        hits = vision_retriever.search(query_embedding, top_k=top_k)
+        hits = active_vision_retriever.search(query_embedding, top_k=top_k)
         
         return {
             "status": "success",
@@ -243,7 +287,7 @@ def _insert_chunks_to_postgres(doc_id: str, title: str, section: str, chunks: li
                 text = chunk["chunk_text"]
                 
                 # Fetch embedding from semantic chunker's loaded model
-                emb = chunker.encode_text(text).tolist()
+                emb = _get_chunker().encode_text(text).tolist()
                 emb_str = "[" + ",".join([str(x) for x in emb]) + "]"
                 
                 cur.execute("""
@@ -271,24 +315,14 @@ def ingest_document(
     Uses standard `def` (instead of `async def`) to safely offload heavy synchronous 
     CPU bounds (SentenceTransformers) and blocking DB I/O to FastAPI's threadpool.
     """
-    global chunker, kg_builder, multimodal_parser, vision_retriever
-    if not chunker or not kg_builder or not multimodal_parser:
-        try:
-            chunk_strategy = os.getenv("CHUNKING_STRATEGY", "semantic").lower()
-            if not chunker:
-                if chunk_strategy == "sliding_window":
-                    chunker = SlidingWindowChunker()
-                else:
-                    chunker = SemanticChunker()
-            if not kg_builder:
-                kg_builder = KGBuilder()
-            if not multimodal_parser:
-                multimodal_parser = MultimodalParser()
-            if not vision_retriever:
-                vision_retriever = PGVectorVisionRetriever()
-        except Exception as e:
-            logger.error(f"Error details: {str(e)}")
-            raise HTTPException(status_code=503, detail="Ingestion services unavailable.")
+    try:
+        active_chunker = _get_chunker()
+        active_kg_builder = _get_kg_builder()
+        active_multimodal_parser = _get_multimodal_parser()
+        active_vision_retriever = _get_vision_retriever()
+    except Exception as e:
+        logger.error(f"Error details: {str(e)}")
+        raise HTTPException(status_code=503, detail="Ingestion services unavailable.")
         
     doc_id = str(uuid.uuid4())
     metadata = {
@@ -305,7 +339,7 @@ def ingest_document(
         if file:
             logger.info("Parsing uploaded file: %s (MIME: %s)", title, file.content_type)
             file_bytes = file.file.read()
-            parsed_text = multimodal_parser.parse(file_bytes, file.content_type)
+            parsed_text = active_multimodal_parser.parse(file_bytes, file.content_type)
             if parsed_text:
                 document_text += parsed_text
                 
@@ -322,7 +356,7 @@ def ingest_document(
         # 1. Chunk Document (Heavy CPU)
         logger.info("Chunking document: %s", title)
         try:
-            chunks = chunker.chunk_document(document_text, metadata)
+            chunks = active_chunker.chunk_document(document_text, metadata)
         except Exception as chunk_err:
             raise RuntimeError(f"Chunking stage failed: {chunk_err}") from chunk_err
         
@@ -337,7 +371,7 @@ def ingest_document(
             if dense_backend == "faiss":
                 logger.info("Persisting %d chunks to FAISS...", len(chunks))
                 from retrieval.dense.faiss_search import FAISSDenseRetriever
-                emb_model_name = chunker.embedding_model_name if hasattr(chunker, "embedding_model_name") else "all-MiniLM-L6-v2"
+                emb_model_name = active_chunker.embedding_model_name if hasattr(active_chunker, "embedding_model_name") else "all-MiniLM-L6-v2"
                 faiss_retriever = FAISSDenseRetriever(emb_model_name)
                 try:
                     faiss_retriever.add_documents(doc_id, chunks)
@@ -370,20 +404,20 @@ def ingest_document(
             if enable_graph_ingestion:
                 logger.info("Building Knowledge Graph for document...")
                 try:
-                    kg_builder.build_graph(chunks)
+                    active_kg_builder.build_graph(chunks)
                 except Exception as graph_err:
                     raise RuntimeError(f"Knowledge graph ingestion failed: {graph_err}") from graph_err
             
             # 4. Multimodal Vision Embeddings (CLIP)
             enable_text_vision_indexing = os.getenv("ENABLE_TEXT_VISION_INDEXING", "true").lower() in {"1", "true", "yes"}
-            if vision_retriever:
+            if active_vision_retriever:
                 logger.info("Generating CLIP multimodal embeddings...")
                 # If an image was uploaded alongside the ingest, embed the raw image once to represent the doc
                 if file_bytes and file.content_type and "image" in file.content_type.lower():
                     try:
                         pic = Image.open(io.BytesIO(file_bytes))
-                        v_emb = vision_retriever.embed(pic)
-                        vision_retriever.insert_vision_chunk(doc_id, -1, "[Raw Image Document]", v_emb)
+                        v_emb = active_vision_retriever.embed(pic)
+                        active_vision_retriever.insert_vision_chunk(doc_id, -1, "[Raw Image Document]", v_emb)
                     except Exception as ve:
                         logger.error(f"Failed to embed raw image: {ve}")
                 
@@ -393,8 +427,8 @@ def ingest_document(
                         text_context = c.get("chunk_text", "")
                         if text_context:
                             try:
-                                v_emb = vision_retriever.embed(text_context)
-                                vision_retriever.insert_vision_chunk(doc_id, idx, text_context, v_emb)
+                                v_emb = active_vision_retriever.embed(text_context)
+                                active_vision_retriever.insert_vision_chunk(doc_id, idx, text_context, v_emb)
                             except Exception as vision_err:
                                 raise RuntimeError(f"Vision persistence failed: {vision_err}") from vision_err
             

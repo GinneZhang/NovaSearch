@@ -104,6 +104,29 @@ def test_role_aware_selection_prefers_family_anchor_before_orphan_bridge():
     assert debug["selection_drop_reasons"].get("orphan_bridge", 0) >= 1
 
 
+def test_ragflow_weighted_fusion_prefers_dense_anchor_with_sparse_support():
+    coordinator = _make_coordinator_stub()
+    dense_hits = [
+        {"doc_id": "d1", "chunk_index": 0, "title": "Trading Policy", "chunk_text": "Blackout starts 15 days before quarter end.", "score": 0.92},
+        {"doc_id": "d2", "chunk_index": 0, "title": "Company Overview", "chunk_text": "Acme was founded in 1998.", "score": 0.70},
+    ]
+    sparse_hits = [
+        {"doc_id": "d1", "chunk_index": 0, "title": "Trading Policy", "chunk_text": "Blackout starts 15 days before quarter end.", "score": 2.1},
+        {"doc_id": "d3", "chunk_index": 0, "title": "Approvals", "chunk_text": "Chief Legal Officer approves exceptions.", "score": 1.7},
+    ]
+
+    fused = coordinator._ragflow_weighted_fusion(
+        "Who approves exceptions to the blackout period?",
+        dense_hits,
+        sparse_hits,
+        fetch_k=3,
+    )
+
+    assert fused[0]["doc_id"] == "d1"
+    assert fused[0]["dense_rank_score"] > 0
+    assert fused[0]["sparse_rank_score"] > 0
+
+
 def test_symbolic_gate_depends_on_query_structure_and_focus_coverage():
     coordinator = _make_coordinator_stub()
     query = "Who approves blackout exceptions in Acme policy?"
@@ -167,6 +190,7 @@ def test_finalize_candidates_emits_role_aware_debug_metrics():
     assert len(selected) == 2
     assert coordinator.last_search_debug["symbolic_triggered"] is True
     assert coordinator.last_search_debug["dynamic_cypher_added"] == 1
+    assert coordinator.last_search_debug["family_pool_count"] >= 2
     assert coordinator.last_search_debug["pre_pack_count"] >= 2
     assert coordinator.last_search_debug["post_pack_count"] == 2
     assert coordinator.last_search_debug["candidate_chains"] >= 1

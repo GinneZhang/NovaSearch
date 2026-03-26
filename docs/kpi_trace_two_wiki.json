@@ -1,0 +1,168 @@
+{
+  "benchmark_name": "two_wiki",
+  "benchmark_display_name": "2WikiMultiHopQA",
+  "benchmark_split": "validation",
+  "benchmark_notes": [
+    "2WikiMultiHopQA uses Hotpot-style page supervision for retrieval hit metrics."
+  ],
+  "runtime_endpoint": "http://127.0.0.1:8060",
+  "runtime_preflight": {
+    "endpoint": "http://127.0.0.1:8060",
+    "schema_version": "chain-aware-v1",
+    "runtime_enabled": true,
+    "candidate_chains": 86,
+    "selected_chains": 6,
+    "chain_lengths": [
+      2,
+      2,
+      2,
+      2,
+      2,
+      2
+    ],
+    "path_score_distribution": [
+      5.305,
+      5.292,
+      5.233,
+      5.208,
+      5.162,
+      5.009
+    ]
+  },
+  "sample_size": 100,
+  "unique_pages_ingested": 770,
+  "cost_savings_pct": 71.11575047876181,
+  "noise_reduction_ratio": 3.4620944513885106,
+  "hit_rate_at_5": 0.99,
+  "mrr_at_5": 0.8548333333333334,
+  "second_hop_trigger_rate": 0.86,
+  "avg_first_hop_candidates": 97.72,
+  "avg_merged_candidates": 121.52,
+  "avg_pre_pack_count": 57.05,
+  "avg_post_pack_count": 33.99,
+  "avg_candidate_chains": 107.53,
+  "avg_selected_chains": 5.01,
+  "chain_debug_observed_cases": 87,
+  "chain_debug_nonzero_cases": 87,
+  "chain_runtime_enabled_cases": 100,
+  "debug_schema_versions": [
+    "chain-aware-v1"
+  ],
+  "avg_final_context_count": 3.93,
+  "avg_bridge_query_count": 2.49,
+  "second_hop_new_evidence_ratio": 0.33122119815668205,
+  "avg_duplicates_removed": 44.71,
+  "avg_bridge_coverage_score": 0.43068799999999974,
+  "avg_support_coverage_score": 0.5859059999999999,
+  "avg_chain_support_coverage_score": 0.7439979999999998,
+  "avg_chain_bridge_coverage_score": 0.7281670000000002,
+  "avg_bridge_chunks_kept": 26.6,
+  "avg_bridge_chunks_dropped": 18.92,
+  "graph_symbolic_candidates": 1360,
+  "graph_symbolic_kept": 70,
+  "graph_symbolic_dropped": 1262,
+  "corroborated_graph_kept": 70,
+  "source_type_mix_totals": {
+    "dense": 3146,
+    "graph_expansion": 70,
+    "lexical": 162,
+    "sparse": 21
+  },
+  "evidence_role_mix_totals": {
+    "bridge": 2660,
+    "direct": 736,
+    "background": 2,
+    "graph": 1
+  },
+  "final_context_chain_mix_totals": {
+    "chain_1": 151,
+    "chain_3": 3046,
+    "chain_2": 44,
+    "no_chain": 158
+  },
+  "avg_generation_context_count": 3.93,
+  "avg_retrieval_context_count": 4.95,
+  "avg_generation_duplicate_title_ratio": 0.0,
+  "answer_em": 0.21,
+  "answer_f1": 0.25032539682539684,
+  "avg_planner_confirmed_generation_count": 0.0,
+  "avg_supporting_selected_generation_count": 1.79,
+  "generation_planner_chunk_ratio": 0.0,
+  "generation_compacted_total": 0,
+  "blocked_seed_count": 0,
+  "supporting_anchor_filtered_count": 0,
+  "planner_rescued_generation_missed_cases": 0,
+  "bridge_targeting_hit_cases": 86,
+  "alias_identity_resolution_improved_cases": 7,
+  "page_family_correct_chunk_wrong_cases": 0,
+  "raw_token_total": 82817.8,
+  "retrieved_token_total": 23921.300000000007,
+  "ingestion_duration_seconds": 126.92935141699854,
+  "query_duration_seconds": 822.4184096660465,
+  "benchmark_mode": false,
+  "graph_ingestion_enabled": false,
+  "graph_retrieval_enabled": false,
+  "vision_retriever_enabled": true,
+  "text_vision_indexing_enabled": true,
+  "samples": [
+    {
+      "query": "What is the place of birth of Queen Jeongsun (Wonjong)'s husband?",
+      "expected_answers": [
+        "Korea"
+      ],
+      "answer": "I don't have enough information in the provided context to answer that.",
+      "scored_answer": "I don't have enough information in the provided context to answer that.",
+      "supporting_titles": [
+        "Queen Jeongsun (Wonjong)"
+      ]
+    },
+    {
+      "query": "Where was the place of burial of Charles Mathew's father?",
+      "expected_answers": [
+        "Cork"
+      ],
+      "answer": "I don't have enough information in the provided context to answer that.",
+      "scored_answer": "I don't have enough information in the provided context to answer that.",
+      "supporting_titles": [
+        "James Charles Mathew",
+        "Charles Mathew"
+      ]
+    },
+    {
+      "query": "Where was the husband of Octavie Coudreau born?",
+      "expected_answers": [
+        "Sonnac"
+      ],
+      "answer": "Henri Coudreau, the husband of Octavie Coudreau, was born in Sonnac. Henri Anatole Coudreau was born on 6 May 1859 in Sonnac [Doc: Henri Coudreau, Section: General].",
+      "scored_answer": "Sonnac",
+      "supporting_titles": [
+        "Octavie Coudreau",
+        "Henri Coudreau"
+      ]
+    },
+    {
+      "query": "Where was the director of film A Day Of Roses In August born?",
+      "expected_answers": [
+        "Halberstadt"
+      ],
+      "answer": "I don't have enough information in the provided context to answer that.",
+      "scored_answer": "I don't have enough information in the provided context to answer that.",
+      "supporting_titles": [
+        "A Day of Roses in August",
+        "George King (film director)"
+      ]
+    },
+    {
+      "query": "Which film has the director who is older, Trader Tom Of The China Seas or Lykkens Musikanter?",
+      "expected_answers": [
+        "Trader Tom Of The China Seas"
+      ],
+      "answer": "Lykkens Musikanter has the director who is older. Peer Guldbrandsen, director of Lykkens Musikanter, was born in 1912, while the director of Trader Tom of the China Seas is not specified in the provided context [Doc: Peer Guldbrandsen, Section: General].",
+      "scored_answer": "Lykkens Musikanter",
+      "supporting_titles": [
+        "Trader Tom of the China Seas",
+        "Lykkens musikanter"
+      ]
+    }
+  ]
+}
