@@ -237,26 +237,29 @@ curl -X POST "http://localhost:8000/ask_vision" \
 ## 运行测试
 
 ```bash
-# 完整测试套件（21 项测试）
+# 完整测试套件
 pytest tests/ -v --ignore=tests/benchmark_rag.py --ignore=tests/load_test.py
 
-# 基准测试
+# 基准测试（基于 Ragas）
 python tests/benchmark_rag.py
 
-# HotpotQA 100-sample
-BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation python tests/benchmark_rag.py
+# HotpotQA 100-sample（generation contexts -> Ragas）
+BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=generation python tests/benchmark_rag.py
 
-# Natural Questions (BeIR/NQ) 100-sample
-BENCHMARK_NAME=nq BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=test python tests/benchmark_rag.py
+# HotpotQA 100-sample（retrieval contexts -> Ragas）
+BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=retrieval python tests/benchmark_rag.py
 
-# 更大规模示例
-BENCHMARK_NAME=nq BENCHMARK_SAMPLE_SIZE=500 BENCHMARK_SPLIT=test python tests/benchmark_rag.py
+# SQuAD 100-sample（generation contexts -> Ragas）
+BENCHMARK_NAME=squad BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=generation python tests/benchmark_rag.py
+
+# SQuAD 2.0 100-sample（retrieval contexts -> Ragas）
+BENCHMARK_NAME=squad_v2 BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=retrieval python tests/benchmark_rag.py
 
 # 负载测试
 python tests/load_test.py
 ```
 
-Natural Questions 这次通过 BeIR/NQ 形式接入，也就是 `corpus + queries + qrels`，而不是直接使用只包含 `question + answer` 的 `nq_open`。这样更符合 NovaSearch 当前“先摄入语料，再检索与回答”的评测结构。详见 [docs/nq_benchmark_integration.md](docs/nq_benchmark_integration.md)。
+Benchmark runner 现在已经切换为以 Ragas 为主的评测框架。正式指标由 Ragas 给出，NovaSearch 自己的 chain/debug 字段继续作为诊断旁路保留。详见 [docs/ragas_evaluation_migration.md](docs/ragas_evaluation_migration.md)。
 
 ---
 

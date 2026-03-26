@@ -65,6 +65,45 @@ def test_role_aware_selection_preserves_direct_and_bridge():
     assert debug["support_coverage_score"] > 0
 
 
+def test_role_aware_selection_prefers_family_anchor_before_orphan_bridge():
+    coordinator = _make_coordinator_stub()
+    query = "Who approves blackout exceptions and when does the blackout period start?"
+    candidates = [
+        {
+            "doc_id": "policy",
+            "chunk_index": 0,
+            "title": "Acme Trading Policy",
+            "chunk_text": "The blackout period starts 15 days before quarter end.",
+            "final_rank_score": 1.15,
+            "sources": ["dense", "lexical"],
+        },
+        {
+            "doc_id": "policy",
+            "chunk_index": 1,
+            "title": "Acme Trading Policy",
+            "chunk_text": "Exceptions require approval from the Chief Legal Officer.",
+            "final_rank_score": 1.11,
+            "retrieval_queries": [query, "Chief Legal Officer exception approval"],
+            "sources": ["dense"],
+        },
+        {
+            "doc_id": "bridge_only",
+            "chunk_index": 0,
+            "title": "Escalation Register",
+            "chunk_text": "Chief Legal Officer escalation approval workflow.",
+            "final_rank_score": 1.45,
+            "retrieval_queries": [query, "Chief Legal Officer escalation approval"],
+            "sources": ["dense"],
+        },
+    ]
+
+    selected, debug = coordinator._select_role_aware_candidates(query=query, candidates=candidates, top_k=2)
+    selected_titles = {hit.get("title") for hit in selected}
+
+    assert "Acme Trading Policy" in selected_titles
+    assert debug["selection_drop_reasons"].get("orphan_bridge", 0) >= 1
+
+
 def test_symbolic_gate_depends_on_query_structure_and_focus_coverage():
     coordinator = _make_coordinator_stub()
     query = "Who approves blackout exceptions in Acme policy?"
@@ -130,6 +169,8 @@ def test_finalize_candidates_emits_role_aware_debug_metrics():
     assert coordinator.last_search_debug["dynamic_cypher_added"] == 1
     assert coordinator.last_search_debug["pre_pack_count"] >= 2
     assert coordinator.last_search_debug["post_pack_count"] == 2
+    assert coordinator.last_search_debug["candidate_chains"] >= 1
+    assert coordinator.last_search_debug["selected_chains"] >= 1
     assert "evidence_role_mix" in coordinator.last_search_debug
     assert "source_type_mix" in coordinator.last_search_debug
 
@@ -205,3 +246,291 @@ def test_corroborated_graph_candidates_can_survive_final_selection():
 
     assert any(hit.get("source_type") == "graph_expansion" for hit in selected)
     assert debug["corroborated_graph_kept"] >= 1
+
+
+def test_chain_builder_marks_follow_up_reasoning_paths():
+    coordinator = _make_coordinator_stub()
+    query = "Who approves the exception to the blackout period?"
+    candidates = [
+        {
+            "doc_id": "policy",
+            "chunk_index": 0,
+            "title": "Trading Policy",
+            "chunk_text": "The blackout period starts 15 days before quarter end.",
+            "final_rank_score": 1.2,
+            "retrieval_queries": [query],
+            "sources": ["dense"],
+        },
+        {
+            "doc_id": "workflow",
+            "chunk_index": 1,
+            "title": "Exception Workflow",
+            "chunk_text": "The Chief Legal Officer approves blackout exceptions.",
+            "final_rank_score": 1.15,
+            "retrieval_queries": [query, "Chief Legal Officer blackout exception"],
+            "sources": ["dense"],
+        },
+    ]
+
+    annotated, debug = coordinator._build_candidate_chains(query, candidates)
+
+    workflow_hit = next(hit for hit in annotated if hit["doc_id"] == "workflow")
+    assert debug["candidate_chains"] >= 1
+    assert debug["selected_chains"] >= 1
+    assert workflow_hit["primary_chain_id"]
+    assert workflow_hit["best_chain_length"] >= 1
+
+
+def test_role_aware_selection_respects_chain_bridge_role_without_follow_up_overlap():
+    coordinator = _make_coordinator_stub()
+    query = "What city contains Para Hills West, South Australia and what is its population?"
+    candidates = [
+        {
+            "doc_id": "suburb",
+            "chunk_index": 0,
+            "title": "Para Hills West, South Australia",
+            "chunk_text": "Para Hills West is a suburb in the City of Salisbury.",
+            "final_rank_score": 1.22,
+            "primary_chain_id": "chain_1",
+            "primary_chain_rank": 1,
+            "best_chain_score": 1.95,
+            "best_chain_length": 2,
+            "primary_chain_complete": True,
+            "chain_selected": True,
+            "primary_chain_member_role": "support",
+            "chain_support_signal": 0.82,
+            "chain_bridge_signal": 0.66,
+            "sources": ["dense"],
+        },
+        {
+            "doc_id": "city",
+            "chunk_index": 0,
+            "title": "City of Salisbury",
+            "chunk_text": "The City of Salisbury has an estimated population of 148,500.",
+            "final_rank_score": 1.05,
+            "primary_chain_id": "chain_1",
+            "primary_chain_rank": 1,
+            "best_chain_score": 1.95,
+            "best_chain_length": 2,
+            "primary_chain_complete": True,
+            "chain_selected": True,
+            "primary_chain_member_role": "bridge",
+            "chain_support_signal": 0.82,
+            "chain_bridge_signal": 0.66,
+            "sources": ["dense"],
+        },
+    ]
+
+    selected, debug = coordinator._select_role_aware_candidates(query=query, candidates=candidates, top_k=2, chain_mode="full")
+
+    selected_titles = {hit.get("title") for hit in selected}
+    assert "Para Hills West, South Australia" in selected_titles
+    assert "City of Salisbury" in selected_titles
+    assert debug["bridge_chunks_kept"] >= 1
+
+
+def test_role_aware_selection_preserves_complete_chain_bundle():
+    coordinator = _make_coordinator_stub()
+    query = "Who wrote The Hobbit and who was his spouse?"
+    candidates = [
+        {
+            "doc_id": "hobbit",
+            "chunk_index": 0,
+            "title": "The Hobbit",
+            "chunk_text": "The Hobbit is a novel written by J. R. R. Tolkien.",
+            "final_rank_score": 1.22,
+            "primary_chain_id": "chain_1",
+            "primary_chain_rank": 1,
+            "best_chain_score": 2.14,
+            "best_chain_length": 2,
+            "primary_chain_complete": True,
+            "chain_selected": True,
+            "primary_chain_member_role": "support",
+            "chain_support_signal": 0.88,
+            "chain_bridge_signal": 0.62,
+            "sources": ["dense"],
+        },
+        {
+            "doc_id": "tolkien",
+            "chunk_index": 0,
+            "title": "J. R. R. Tolkien",
+            "chunk_text": "Edith Tolkien was the spouse of J. R. R. Tolkien.",
+            "final_rank_score": 1.04,
+            "primary_chain_id": "chain_1",
+            "primary_chain_rank": 1,
+            "best_chain_score": 2.14,
+            "best_chain_length": 2,
+            "primary_chain_complete": True,
+            "chain_selected": True,
+            "primary_chain_member_role": "bridge",
+            "chain_support_signal": 0.88,
+            "chain_bridge_signal": 0.62,
+            "sources": ["dense"],
+        },
+        {
+            "doc_id": "background",
+            "chunk_index": 0,
+            "title": "Fantasy Literature",
+            "chunk_text": "Fantasy literature became globally popular in the twentieth century.",
+            "final_rank_score": 0.72,
+            "sources": ["sparse"],
+        },
+    ]
+
+    selected, debug = coordinator._select_role_aware_candidates(query=query, candidates=candidates, top_k=2, chain_mode="full")
+
+    selected_titles = {hit.get("title") for hit in selected}
+    assert selected_titles == {"The Hobbit", "J. R. R. Tolkien"}
+    assert debug["chain_bundle_rows_kept"] >= 2
+
+
+def test_decide_chain_mode_bypasses_when_direct_evidence_is_strong():
+    coordinator = _make_coordinator_stub()
+    reranked_hits = [
+        {
+            "doc_id": "d1",
+            "chunk_index": 0,
+            "title": "Blackout Policy",
+            "chunk_text": "The blackout period starts 15 days before quarter end and exceptions are approved by the Chief Legal Officer.",
+            "final_rank_score": 1.6,
+        },
+        {
+            "doc_id": "d2",
+            "chunk_index": 0,
+            "title": "Approval Policy",
+            "chunk_text": "The Chief Legal Officer approves exceptions to the blackout period.",
+            "final_rank_score": 1.45,
+        },
+        {
+            "doc_id": "d3",
+            "chunk_index": 0,
+            "title": "Policy FAQ",
+            "chunk_text": "Blackout exceptions require CLO sign-off.",
+            "final_rank_score": 1.35,
+        },
+    ]
+
+    decision = coordinator._decide_chain_mode(
+        query="Who approves exceptions to the blackout period?",
+        reranked_hits=reranked_hits,
+        query_graph=[],
+        top_k=5,
+    )
+
+    assert decision["mode"] == "bypass"
+    assert decision["reason"] in {"strong_direct_evidence", "simple_query_strong_direct_evidence"}
+
+
+def test_decide_chain_mode_uses_full_when_bridge_pressure_is_high():
+    coordinator = _make_coordinator_stub()
+    reranked_hits = [
+        {
+            "doc_id": "policy",
+            "chunk_index": 0,
+            "title": "Trading Policy",
+            "chunk_text": "The blackout period starts before quarter end.",
+            "final_rank_score": 1.1,
+            "retrieval_queries": ["Who approves the exception to the blackout period?"],
+        },
+        {
+            "doc_id": "workflow",
+            "chunk_index": 0,
+            "title": "Exception Workflow",
+            "chunk_text": "The Chief Legal Officer approves blackout exceptions.",
+            "final_rank_score": 1.0,
+            "retrieval_queries": [
+                "Who approves the exception to the blackout period?",
+                "Chief Legal Officer blackout exception",
+                "blackout exception approver",
+            ],
+        },
+    ]
+
+    decision = coordinator._decide_chain_mode(
+        query="Who approves the exception to the blackout period?",
+        reranked_hits=reranked_hits,
+        query_graph=[{"subject": "exception", "relation": "APPROVED_BY", "object": "officer"}],
+        top_k=5,
+    )
+
+    assert decision["mode"] == "full"
+    assert decision["reason"] == "bridge_or_multi_step_pressure"
+
+
+def test_role_aware_selection_enforces_bridge_budget_in_bypass_mode():
+    coordinator = _make_coordinator_stub()
+    query = "What is the blackout period and who approves the exception?"
+    candidates = [
+        {
+            "doc_id": "d1",
+            "chunk_index": 0,
+            "title": "Policy",
+            "chunk_text": "The blackout period starts 15 days before quarter end and exceptions are approved by the Chief Legal Officer.",
+            "final_rank_score": 1.8,
+            "sources": ["dense"],
+        },
+        {
+            "doc_id": "d2",
+            "chunk_index": 0,
+            "title": "Exception Workflow",
+            "chunk_text": "Chief Legal Officer exception path.",
+            "final_rank_score": 1.1,
+            "retrieval_queries": ["Chief Legal Officer exception"],
+            "sources": ["dense"],
+        },
+    ]
+
+    selected, debug = coordinator._select_role_aware_candidates(
+        query=query,
+        candidates=candidates,
+        top_k=2,
+        chain_mode="bypass",
+        chain_activation_reason="strong_direct_evidence",
+    )
+
+    assert {hit["title"] for hit in selected} == {"Policy"}
+    assert debug["bridge_budget_used"] == 0
+    assert debug["selection_drop_reasons"].get("bridge_budget", 0) >= 1
+    assert debug["chain_mode_selected"] == "bypass"
+
+
+def test_finalize_candidates_emits_chain_mode_and_pruning_debug():
+    coordinator = _make_coordinator_stub()
+    coordinator.cross_encoder = SimpleNamespace(rerank=lambda _q, hits, top_k=10: hits[:top_k])
+    coordinator._expand_candidate_documents = lambda _q, hits, fetch_k=40: hits[:fetch_k]
+    coordinator._graph_expansion = lambda hits, query="": hits
+    coordinator._deep_graph_search = lambda query, query_graph=None: []
+    coordinator._should_use_symbolic_search = lambda query, query_graph, reranked_hits: False
+
+    pool = [
+        {
+            "doc_id": "d1",
+            "chunk_index": 0,
+            "title": "Policy",
+            "chunk_text": "The blackout period starts 15 days before quarter end and exceptions are approved by the Chief Legal Officer.",
+            "score": 1.4,
+            "sources": ["dense", "sparse"],
+        },
+        {
+            "doc_id": "d2",
+            "chunk_index": 0,
+            "title": "Workflow",
+            "chunk_text": "Chief Legal Officer approval flow.",
+            "score": 1.0,
+            "retrieval_queries": ["Chief Legal Officer approval flow"],
+            "sources": ["dense"],
+        },
+    ]
+
+    coordinator.finalize_candidates(
+        query="Who approves exceptions to the blackout period?",
+        candidate_pool=pool,
+        top_k=2,
+        query_graph=[],
+    )
+
+    assert coordinator.last_search_debug["chain_mode_selected"] in {"bypass", "light", "full"}
+    assert "chain_activation_reason" in coordinator.last_search_debug
+    assert "second_hop_candidates_added" in coordinator.last_search_debug
+    assert "bridge_budget_used" in coordinator.last_search_debug
+    assert "chain_score_components" in coordinator.last_search_debug

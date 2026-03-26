@@ -12,7 +12,7 @@ import json
 import uuid
 import logging
 import math
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import List, Dict, Any, Optional, Tuple
 
 try:
@@ -119,6 +119,9 @@ class EnterpriseCopilotAgent:
             evidence_role = str(hit.get("evidence_role") or hit.get("role") or "support").strip().upper()
             source_type = self._infer_hit_source_type(hit).upper()
             merged_indices = hit.get("merged_chunk_indices") or []
+            primary_chain_id = hit.get("primary_chain_id")
+            primary_chain_rank = hit.get("primary_chain_rank")
+            best_chain_score = _safe_numeric(hit.get("best_chain_score"), 0.0)
             
             # Extract Graph Context
             graph_info = hit.get("graph_context")
@@ -135,6 +138,14 @@ class EnterpriseCopilotAgent:
             block += f"[Retrieval Type]: {source.upper()} (Score: {score:.3f})\n"
             block += f"[Evidence Role]: {evidence_role}\n"
             block += f"[Source Type]: {source_type}\n"
+            if primary_chain_id:
+                block += f"[Evidence Chain]: {primary_chain_id}"
+                if primary_chain_rank:
+                    block += f" (rank {primary_chain_rank}"
+                    if best_chain_score:
+                        block += f", score {best_chain_score:.3f}"
+                    block += ")"
+                block += "\n"
             if merged_indices:
                 block += f"[Merged Chunk Indices]: {', '.join(str(idx) for idx in merged_indices)}\n"
             if hit.get("is_corroborated") is not None:
@@ -971,7 +982,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
 
         return anchored_queries[:2]
 
-    def _merge_priority_queries(self, priority_queries: List[str], fallback_queries: List[str], limit: int = 4) -> List[str]:
+    def _merge_priority_queries(self, priority_queries: List[str], fallback_queries: List[str], limit: int = 3) -> List[str]:
         merged: List[str] = []
         seen = set()
         for candidate in [*(priority_queries or []), *(fallback_queries or [])]:
@@ -984,6 +995,51 @@ If the user greets you or asks about your capabilities, you may respond naturall
             if len(merged) >= max(1, limit):
                 break
         return merged[: max(1, limit)]
+
+    @staticmethod
+    def _resolve_feature_flag(name: str, default: bool) -> bool:
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+        return raw_value.lower() in {"1", "true", "yes"}
+
+    def _should_use_early_second_hop(
+        self,
+        search_query: str,
+        sub_queries: List[str],
+        query_graph: Optional[List[Dict[str, Any]]],
+        initial_hits: List[Dict[str, Any]],
+        initial_chain_mode: str,
+    ) -> Tuple[bool, str]:
+        chain_mode = (initial_chain_mode or "light").lower()
+        if chain_mode == "bypass":
+            return False, "bypass_chain_mode"
+
+        bridge_hits = 0
+        bridge_signal_sum = 0.0
+        for hit in initial_hits[:8]:
+            bridge_signal = max(
+                _safe_numeric(hit.get("chain_bridge_signal"), 0.0),
+                _safe_numeric(hit.get("bridge_score"), 0.0),
+            )
+            is_bridge_member = str(hit.get("primary_chain_member_role") or "").lower() == "bridge"
+            if bridge_signal >= 0.18 or is_bridge_member or int(hit.get("best_chain_length") or 1) > 1:
+                bridge_hits += 1
+                bridge_signal_sum += bridge_signal
+
+        avg_bridge_signal = bridge_signal_sum / max(1, bridge_hits)
+        has_planner_decomposition = len(sub_queries) > 1 or bool(query_graph)
+        has_query_multi_hop_signal = self.retriever._is_multi_hop_query(search_query)
+
+        if has_planner_decomposition:
+            return True, "planner_or_query_graph"
+        if chain_mode == "full":
+            return True, "full_chain_mode"
+        if has_query_multi_hop_signal and bridge_hits >= 1:
+            return True, "query_and_bridge_signal"
+        if bridge_hits >= 2 and avg_bridge_signal >= 0.16:
+            return True, "multiple_bridge_hits"
+        return False, "insufficient_bridge_pressure"
 
     def _extract_alias_bridge_candidates(self, query: str, hits: List[Dict[str, Any]]) -> List[str]:
         query_terms = set(_normalize_terms(query))
@@ -1271,6 +1327,136 @@ If the user greets you or asks about your capabilities, you may respond naturall
             "bridge_entity_family_chunk_miss": 1 if targeting_hits > 0 and answer_bearing_hits == 0 else 0,
         }
 
+    def _prune_bridge_queries_by_retrieval_signal(
+        self,
+        search_query: str,
+        retrieval_top_k: int,
+        sub_queries: List[str],
+        bridge_queries: List[str],
+        bridge_entities: List[str],
+        query_graph: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[List[str], Dict[str, Any]]:
+        if len(bridge_queries) <= 2:
+            return bridge_queries[:], {
+                "bridge_query_pruned_from": len(bridge_queries),
+                "bridge_query_pruned_to": len(bridge_queries),
+                "bridge_query_branch_scores": {},
+            }
+
+        branch_rows: List[Tuple[float, str]] = []
+        branch_scores: Dict[str, Dict[str, float]] = {}
+        branch_top_k = max(8, min(retrieval_top_k, 12))
+        for candidate_query in bridge_queries[:4]:
+            candidate_pool = self.retriever.collect_candidate_pool(
+                search_query,
+                top_k=branch_top_k,
+                additional_queries=sub_queries[1:] + [candidate_query],
+                include_follow_ups=False,
+            )
+            branch_hits = self.retriever.finalize_candidates(
+                search_query,
+                candidate_pool,
+                top_k=branch_top_k,
+                query_graph=query_graph,
+            )
+            targeting_summary = self._summarize_bridge_targeting_hits(
+                search_query,
+                branch_hits,
+                [candidate_query],
+                bridge_entities,
+            )
+            answer_bearing = float(targeting_summary["answer_bearing_bridge_hits"])
+            targeted = float(targeting_summary["bridge_targeting_hits"])
+            miss_penalty = float(targeting_summary["bridge_entity_family_chunk_miss"])
+            top_score = max(
+                (
+                    _safe_numeric(
+                        hit.get("final_rank_score"),
+                        _safe_numeric(hit.get("cross_encoder_score"), _safe_numeric(hit.get("score"), 0.0)),
+                    )
+                    for hit in branch_hits[:4]
+                ),
+                default=0.0,
+            )
+            score = (2.0 * answer_bearing) + (0.8 * targeted) + (0.25 * top_score) - (0.75 * miss_penalty)
+            branch_rows.append((score, candidate_query))
+            branch_scores[candidate_query] = {
+                "score": round(score, 4),
+                "answer_bearing_bridge_hits": answer_bearing,
+                "bridge_targeting_hits": targeted,
+                "bridge_entity_family_chunk_miss": miss_penalty,
+                "top_rank_score": round(top_score, 4),
+            }
+
+        branch_rows.sort(key=lambda item: item[0], reverse=True)
+        kept_queries = [query for _, query in branch_rows[:2]]
+        # Preserve any untouched tail query only if pruning would collapse to a single option.
+        if len(kept_queries) < 2:
+            for query in bridge_queries:
+                if query not in kept_queries:
+                    kept_queries.append(query)
+                if len(kept_queries) >= 2:
+                    break
+
+        return kept_queries[:2], {
+            "bridge_query_pruned_from": len(bridge_queries),
+            "bridge_query_pruned_to": len(kept_queries[:2]),
+            "bridge_query_branch_scores": branch_scores,
+        }
+
+    def _build_evidence_conditioned_follow_up_queries(
+        self,
+        query: str,
+        hits: List[Dict[str, Any]],
+        relation_hints: List[str],
+        entity_candidates: List[str],
+    ) -> List[str]:
+        if not hits:
+            return []
+
+        ranked_hits = sorted(
+            hits,
+            key=lambda hit: (
+                _safe_numeric(
+                    hit.get("final_rank_score"),
+                    _safe_numeric(hit.get("cross_encoder_score"), _safe_numeric(hit.get("score"), 0.0)),
+                )
+                + (0.35 * _safe_numeric(hit.get("chain_support_signal"), 0.0))
+                + (0.25 * _safe_numeric(hit.get("answer_score"), 0.0))
+            ),
+            reverse=True,
+        )
+        seen = set()
+        conditioned_queries: List[str] = []
+        query_lower = query.lower().strip()
+
+        def _append(candidate: str) -> None:
+            normalized = (candidate or "").strip()
+            lowered = normalized.lower()
+            if not normalized or lowered == query_lower or lowered in seen:
+                return
+            seen.add(lowered)
+            conditioned_queries.append(normalized)
+
+        for hit in ranked_hits[:3]:
+            title = (((hit.get("graph_context") or {}).get("doc_title")) or hit.get("title") or "").strip()
+            if not title:
+                continue
+            title_terms = set(_normalize_terms(title))
+            _append(title)
+            for hint in relation_hints[:2]:
+                hint_terms = [token for token in _normalize_terms(hint) if token not in title_terms][:3]
+                if not hint_terms:
+                    continue
+                _append(f"{title} {' '.join(hint_terms)}")
+
+        for entity in entity_candidates[:3]:
+            _append(entity)
+            for hint in relation_hints[:1]:
+                _append(f"{entity} {hint}")
+
+        return conditioned_queries[:3]
+
     def _generic_bridge_follow_up_queries(
         self,
         query: str,
@@ -1296,7 +1482,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 queries.append(candidate)
                 seen.add(lowered)
 
-        return queries[:6]
+        return queries[:3]
 
     def _deterministic_bridge_follow_up_queries(
         self,
@@ -1323,7 +1509,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 queries.append(candidate)
                 seen.add(lowered)
 
-        return queries[:6]
+        return queries[:3]
 
     def _extract_query_subject_candidates(self, query: str) -> List[str]:
         subjects: List[str] = []
@@ -1510,6 +1696,121 @@ If the user greets you or asks about your capabilities, you may respond naturall
         messages.append({"role": "user", "content": final_user_content})
         return messages
 
+    def _extract_brief_answer_text(self, answer: str) -> str:
+        text = (answer or "").strip()
+        if not text:
+            return ""
+        if self._is_refusal_answer(text):
+            return "I don't have enough information in the provided context to answer that."
+
+        text = re.sub(r"\[Doc:\s*[^\]]+\]", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"^(?:answer|short answer|final answer)\s*:\s*", "", text, flags=re.IGNORECASE)
+        first_sentence = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0].strip()
+        if first_sentence:
+            text = first_sentence
+        return text.strip(" \"'")
+
+    @staticmethod
+    def _is_refusal_answer(answer: str) -> bool:
+        lowered = (answer or "").lower()
+        refusal_markers = (
+            "don't have enough information",
+            "do not have enough information",
+            "insufficient information",
+            "not enough information",
+            "cannot be determined from the provided context",
+        )
+        return any(marker in lowered for marker in refusal_markers)
+
+    def _build_benchmark_answer_projection_messages(
+        self,
+        query: str,
+        context_str: str,
+        draft_answer: str,
+    ) -> List[Dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You are a benchmark answer projector.\n"
+                    "Given a user question, grounded source context, and a draft grounded answer, "
+                    "extract the shortest final answer string supported by the context.\n"
+                    "Rules:\n"
+                    "1. Return only the minimal answer phrase or sentence fragment.\n"
+                    "2. No citations, no explanation, no preamble.\n"
+                    "3. If the context does not support a clear answer, return exactly: "
+                    "\"I don't have enough information in the provided context to answer that.\""
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {query}\n\n"
+                    f"<Context>\n{context_str}\n</Context>\n\n"
+                    f"Draft Answer:\n{draft_answer}\n\n"
+                    "Return the shortest supported final answer."
+                ),
+            },
+        ]
+
+    def _project_benchmark_answer(
+        self,
+        query: str,
+        context_str: str,
+        draft_answer: str,
+    ) -> str:
+        concise = self._extract_brief_answer_text(draft_answer)
+        if not self.client:
+            return concise
+        try:
+            messages = self._build_benchmark_answer_projection_messages(query, context_str, draft_answer)
+            projected = self._generate_buffered(messages)
+            cleaned = self._extract_brief_answer_text(projected)
+            return cleaned or concise
+        except Exception:
+            return concise
+
+    def _build_benchmark_reader_messages(
+        self,
+        query: str,
+        context_str: str,
+        draft_answer: str,
+    ) -> List[Dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You are an exact-answer reader for grounded question answering.\n"
+                    "Use only the provided context.\n"
+                    "Think about the evidence chain privately, but output only the final short answer.\n"
+                    "Rules:\n"
+                    "1. Return the shortest exact answer span or phrase supported by the context.\n"
+                    "2. Prefer proper names, dates, locations, titles, counts, or noun phrases exactly as supported.\n"
+                    "3. Do not explain. Do not cite. Do not restate the question.\n"
+                    "4. If the context does not support a clear answer, return exactly: "
+                    "\"I don't have enough information in the provided context to answer that.\""
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {query}\n\n"
+                    f"<Context>\n{context_str}\n</Context>\n\n"
+                    f"Draft grounded answer:\n{draft_answer}\n\n"
+                    "Return only the final short answer."
+                ),
+            },
+        ]
+
+    def _generate_benchmark_short_answer(
+        self,
+        query: str,
+        context_str: str,
+        draft_answer: str,
+    ) -> str:
+        return self._project_benchmark_answer(query, context_str, draft_answer)
+
     def _update_generation_debug_metrics(
         self,
         debug_metrics: Dict[str, Any],
@@ -1551,12 +1852,41 @@ If the user greets you or asks about your capabilities, you may respond naturall
         debug_metrics["generation_evidence_role_mix"] = dict(
             Counter(str(hit.get("evidence_role") or hit.get("role") or "background").lower() for hit in generation_hits)
         )
+        generation_chain_ids = {
+            str(hit.get("primary_chain_id"))
+            for hit in generation_hits
+            if hit.get("primary_chain_id")
+        }
+        supporting_chain_ids = {
+            str(hit.get("primary_chain_id"))
+            for hit in (supporting_hits or [])
+            if hit.get("primary_chain_id")
+        }
+        debug_metrics["generation_chain_mix"] = dict(
+            Counter(
+                (
+                    f"chain_{min(max(int(hit.get('primary_chain_rank') or 1), 1), 3)}"
+                    if hit.get("primary_chain_id") else "no_chain"
+                )
+                for hit in generation_hits
+            )
+        )
+        debug_metrics["generation_chain_count"] = len(generation_chain_ids)
+        debug_metrics["supporting_inherited_chain_count"] = len(generation_chain_ids & supporting_chain_ids)
         debug_metrics["generation_uncorroborated_graph_count"] = sum(
             1
             for hit in generation_hits
             if self._is_graph_like_source_type(self._infer_hit_source_type(hit))
             and not bool(hit.get("is_corroborated"))
         )
+        generation_selection_debug = getattr(self, "_last_generation_selection_debug", {}) or {}
+        debug_metrics["generation_chain_mode_selected"] = generation_selection_debug.get("chain_mode_selected")
+        debug_metrics["generation_chain_activation_reason"] = generation_selection_debug.get("chain_activation_reason")
+        debug_metrics["generation_bridge_budget_used"] = generation_selection_debug.get("bridge_budget_used", 0)
+        debug_metrics["generation_weak_bridge_candidates_dropped"] = generation_selection_debug.get("weak_bridge_candidates_dropped", 0)
+        debug_metrics["generation_final_context_bridge_fraction"] = generation_selection_debug.get("final_context_bridge_fraction", 0.0)
+        debug_metrics["generation_final_context_direct_support_fraction"] = generation_selection_debug.get("final_context_direct_support_fraction", 0.0)
+        debug_metrics["generation_chain_vs_standalone_mix"] = generation_selection_debug.get("chain_vs_standalone_mix", {})
 
     def _assemble_generation_context_hits(
         self,
@@ -1569,6 +1899,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
         follow_up_queries: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         if not hits or limit <= 0:
+            self._last_generation_selection_debug = {}
             return []
 
         query_terms = set(_normalize_terms(search_query))
@@ -1582,6 +1913,11 @@ If the user greets you or asks about your capabilities, you may respond naturall
         supporting_keys = {
             (support_hit.get("doc_id"), support_hit.get("chunk_index"))
             for support_hit in (supporting_hits or [])
+        }
+        supporting_chain_ids = {
+            str(support_hit.get("primary_chain_id"))
+            for support_hit in (supporting_hits or [])
+            if support_hit.get("primary_chain_id")
         }
         supporting_title_keys = {
             ((((support_hit.get("graph_context") or {}).get("doc_title")) or support_hit.get("title") or "").strip().lower())
@@ -1604,6 +1940,27 @@ If the user greets you or asks about your capabilities, you may respond naturall
             if role in {"answer", "direct", "bridge", "graph", "symbolic"}:
                 title_family_role_hits[title_key] += 1
         prepared_rows = []
+        observed_chain_modes = Counter(
+            str(hit.get("chain_mode_selected") or "").lower()
+            for hit in hits
+            if str(hit.get("chain_mode_selected") or "").strip()
+        )
+        generation_chain_mode = "full"
+        if observed_chain_modes:
+            generation_chain_mode = observed_chain_modes.most_common(1)[0][0]
+        generation_chain_reason = next(
+            (
+                str(hit.get("chain_activation_reason"))
+                for hit in hits
+                if str(hit.get("chain_activation_reason") or "").strip()
+            ),
+            "mixed_evidence_profile",
+        )
+        packing_settings = {
+            "bypass": {"bridge_cap": 0, "background_cap": 0, "weak_bridge_threshold": 0.72, "chain_bundle_cap": 0},
+            "light": {"bridge_cap": 1, "background_cap": 0, "weak_bridge_threshold": 0.64, "chain_bundle_cap": 1},
+            "full": {"bridge_cap": 2, "background_cap": background_limit, "weak_bridge_threshold": 0.55, "chain_bundle_cap": 2},
+        }.get(generation_chain_mode, {"bridge_cap": 2, "background_cap": background_limit, "weak_bridge_threshold": 0.55, "chain_bundle_cap": 2})
         for position, hit in enumerate(hits):
             scores = {
                 "answer_score": _safe_numeric(hit.get("answer_score"), None),
@@ -1652,20 +2009,6 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 + (0.10 if bridge_queries else 0.0)
             )
 
-            weak_match = not (
-                (title_terms & query_terms)
-                or (body_terms & query_terms)
-                or (title_terms & bridge_terms)
-                or (body_terms & bridge_terms)
-            )
-            role = "background"
-            if answer_signal >= max(bridge_signal + 0.18, 0.72):
-                role = "answer"
-            elif bridge_signal >= 0.55:
-                role = "bridge"
-            elif answer_signal >= 0.78:
-                role = "answer"
-
             lowered_body = body_text.strip().lower()
             lowered_title = title.strip().lower()
             definition_like = False
@@ -1688,6 +2031,59 @@ If the user greets you or asks about your capabilities, you may respond naturall
             is_planner_confirmed = self._is_follow_up_confirmed_hit(hit, follow_up_queries)
             source_type = self._infer_hit_source_type(hit)
             is_graph_like = self._is_graph_like_source_type(source_type)
+            primary_chain_id = str(hit.get("primary_chain_id") or "").strip()
+            primary_chain_rank = int(hit.get("primary_chain_rank") or 0) if hit.get("primary_chain_rank") else 0
+            best_chain_score = _safe_numeric(hit.get("best_chain_score"), 0.0)
+            best_chain_length = int(hit.get("best_chain_length") or 1)
+            primary_chain_complete = bool(hit.get("primary_chain_complete"))
+            chain_selected = bool(hit.get("chain_selected"))
+            primary_chain_member_role = str(hit.get("primary_chain_member_role") or "").lower()
+            chain_support_signal = _safe_numeric(hit.get("chain_support_signal"), 0.0)
+            chain_bridge_signal = _safe_numeric(hit.get("chain_bridge_signal"), 0.0)
+            chain_bridge_candidate = bool(
+                primary_chain_id
+                and (
+                    primary_chain_member_role == "bridge"
+                    or (chain_bridge_signal >= 0.28 and best_chain_length > 1)
+                )
+            )
+            chain_support_candidate = bool(
+                primary_chain_id
+                and (
+                    primary_chain_member_role == "support"
+                    or chain_support_signal >= 0.24
+                )
+            )
+            if chain_bridge_candidate:
+                bridge_signal = max(
+                    bridge_signal,
+                    min(1.2, (0.56 * chain_bridge_signal) + (0.12 if primary_chain_complete else 0.0)),
+                )
+            if chain_support_candidate:
+                answer_signal = max(
+                    answer_signal,
+                    min(1.4, (0.52 * chain_support_signal) + (0.10 if primary_chain_complete else 0.0)),
+                )
+            weak_match = not (
+                (title_terms & query_terms)
+                or (body_terms & query_terms)
+                or (title_terms & bridge_terms)
+                or (body_terms & bridge_terms)
+            )
+            role = "background"
+            if primary_chain_member_role == "bridge" and chain_bridge_candidate and answer_signal < 1.18:
+                role = "bridge"
+            elif chain_bridge_candidate and bridge_signal >= max(0.48, answer_signal - 0.12):
+                role = "bridge"
+            elif answer_signal >= max(bridge_signal + 0.18, 0.72):
+                role = "answer"
+            elif bridge_signal >= 0.55:
+                role = "bridge"
+            elif answer_signal >= 0.78:
+                role = "answer"
+            elif chain_support_candidate and answer_signal >= 0.62:
+                role = "answer"
+
             family_sources = title_family_sources.get(title_key, set())
             corroboration_count = max(0, len(family_sources) - 1)
             if title_family_focus_hits.get(title_key, 0) > 1:
@@ -1704,12 +2100,23 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 corroboration_count > 0
                 or (not is_graph_like and focus_overlap > 0)
             )
+            chain_bonus = 0.0
+            if primary_chain_id:
+                chain_bonus += min(0.30, 0.06 * best_chain_length)
+                chain_bonus += min(0.18, 0.08 * max(0.0, best_chain_score - scores["joint_score"]))
+                if chain_selected:
+                    chain_bonus += 0.10
+                if primary_chain_complete and role in {"answer", "bridge"}:
+                    chain_bonus += 0.16
+                if supporting_chain_ids and primary_chain_id in supporting_chain_ids:
+                    chain_bonus += 0.28
 
             utility_score = (
                 max(answer_signal, bridge_signal)
                 + (0.28 * min(answer_signal, bridge_signal))
                 - (0.28 if weak_match else 0.0)
                 - filler_penalty
+                + chain_bonus
                 - (0.015 * position)
             )
             if is_supporting_selected:
@@ -1751,6 +2158,16 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 "is_graph_like": is_graph_like,
                 "corroboration_count": corroboration_count,
                 "is_corroborated": is_corroborated,
+                "primary_chain_id": primary_chain_id or None,
+                "primary_chain_rank": primary_chain_rank,
+                "best_chain_score": best_chain_score,
+                "best_chain_length": best_chain_length,
+                "primary_chain_complete": primary_chain_complete,
+                "chain_selected": chain_selected,
+                "primary_chain_member_role": primary_chain_member_role or None,
+                "chain_bridge_candidate": chain_bridge_candidate,
+                "chain_support_candidate": chain_support_candidate,
+                "chain_bonus": chain_bonus,
             })
 
         prepared_rows.sort(
@@ -1768,8 +2185,12 @@ If the user greets you or asks about your capabilities, you may respond naturall
         selected_texts_by_title: Dict[str, List[str]] = {}
         role_counts = {"answer": 0, "bridge": 0, "background": 0}
         source_counts = Counter()
+        selected_family_answer = set()
+        selected_chain_roles: Dict[str, set] = defaultdict(set)
         non_support_title_keys = set()
         support_family_active = bool(supporting_title_keys)
+        bridge_budget_used = 0
+        weak_bridge_candidates_dropped = 0
         source_type_caps = {
             "symbolic": 1,
             "graph_expansion": 1,
@@ -1777,6 +2198,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
         }
 
         def _try_select(row: Dict[str, Any], allow_background: bool) -> bool:
+            nonlocal bridge_budget_used
             if row["key"] in seen_keys:
                 return False
             if row["role"] == "background" and not allow_background and not row["is_supporting_selected"]:
@@ -1806,10 +2228,24 @@ If the user greets you or asks about your capabilities, you may respond naturall
                     if len(non_support_title_keys) >= 1 and not row["is_planner_confirmed"]:
                         return False
             if row["role"] == "background":
-                if role_counts["background"] >= max(0, background_limit):
+                if role_counts["background"] >= max(0, int(packing_settings["background_cap"])):
                     return False
                 if role_counts["answer"] >= 1 and role_counts["bridge"] >= 1:
                     return False
+            if row["role"] == "bridge" and not row["is_supporting_selected"]:
+                if row["answer_signal"] < 0.92:
+                    chain_id = row.get("primary_chain_id")
+                    family_answer_selected = row["title_key"] in selected_family_answer
+                    chain_answer_selected = bool(
+                        chain_id and ("answer" in selected_chain_roles.get(chain_id, set()) or "support" in selected_chain_roles.get(chain_id, set()))
+                    )
+                    if not family_answer_selected and not chain_answer_selected:
+                        if not row.get("primary_chain_complete") or not row.get("is_corroborated"):
+                            return False
+                    if bridge_budget_used >= int(packing_settings["bridge_cap"]):
+                        return False
+                    if row["bridge_signal"] < float(packing_settings["weak_bridge_threshold"]):
+                        return False
 
             selected_rows.append(row)
             seen_keys.add(row["key"])
@@ -1820,7 +2256,38 @@ If the user greets you or asks about your capabilities, you may respond naturall
                     non_support_title_keys.add(row["title_key"])
             role_counts[row["role"]] = role_counts.get(row["role"], 0) + 1
             source_counts[row["source_type"]] += 1
+            if row["role"] == "answer":
+                selected_family_answer.add(row["title_key"])
+            if row.get("primary_chain_id"):
+                selected_chain_roles[row["primary_chain_id"]].add(row["role"])
+                if row.get("chain_support_candidate"):
+                    selected_chain_roles[row["primary_chain_id"]].add("support")
+            if row["role"] == "bridge" and not row["is_supporting_selected"] and row["answer_signal"] < 0.92:
+                bridge_budget_used += 1
             return True
+
+        family_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        family_scores: Dict[str, float] = {}
+        for row in prepared_rows:
+            family_rows[row["title_key"]].append(row)
+        for title_key, rows_in_family in family_rows.items():
+            best_answer = max(
+                (
+                    row["utility_score"]
+                    for row in rows_in_family
+                    if row["role"] == "answer" or row["is_supporting_selected"] or row.get("chain_support_candidate")
+                ),
+                default=max(row["utility_score"] for row in rows_in_family) - 0.20,
+            )
+            best_any = max(row["utility_score"] for row in rows_in_family)
+            family_scores[title_key] = (
+                (0.72 * best_answer)
+                + (0.28 * best_any)
+                + (0.20 if supporting_title_keys and title_key in supporting_title_keys else 0.0)
+                + (0.08 * min(2, title_family_focus_hits.get(title_key, 0)))
+                + (0.06 * min(2, title_family_role_hits.get(title_key, 0)))
+                + (0.06 * len(title_family_sources.get(title_key, set())))
+            )
 
         answer_rows = [row for row in prepared_rows if row["role"] == "answer"]
         bridge_rows = [row for row in prepared_rows if row["role"] == "bridge"]
@@ -1830,8 +2297,66 @@ If the user greets you or asks about your capabilities, you may respond naturall
             row for row in prepared_rows
             if row["is_planner_confirmed"] and row["role"] in {"answer", "bridge"}
         ]
+        planner_rows.sort(
+            key=lambda row: (
+                1 if row["role"] == "answer" or row.get("chain_support_candidate") else 0,
+                row["utility_score"],
+            ),
+            reverse=True,
+        )
+        chain_seed_rows = []
+        seen_chain_ids = set()
+        for row in prepared_rows:
+            chain_id = row.get("primary_chain_id")
+            if not chain_id or chain_id in seen_chain_ids:
+                continue
+            if (
+                row["role"] != "answer"
+                and not row.get("chain_support_candidate")
+                and not row["is_supporting_selected"]
+                and not row["is_planner_confirmed"]
+            ):
+                continue
+            chain_seed_rows.append(row)
+            seen_chain_ids.add(chain_id)
+
+        family_quota = max(2, min(limit, max(2, (limit // 2) + 1)))
+        ranked_families = sorted(family_scores.items(), key=lambda item: item[1], reverse=True)
+        for title_key, _ in ranked_families[:family_quota]:
+            rows_in_family = sorted(
+                family_rows[title_key],
+                key=lambda row: (
+                    row["role"] == "answer" or row["is_supporting_selected"] or row.get("chain_support_candidate"),
+                    row["is_corroborated"],
+                    row["utility_score"],
+                ),
+                reverse=True,
+            )
+            family_anchor_taken = False
+            for row in rows_in_family:
+                if row["role"] not in {"answer", "bridge"} and not row["is_supporting_selected"] and not row.get("chain_support_candidate"):
+                    continue
+                if row["role"] == "bridge" and not (row["is_corroborated"] or row["is_supporting_selected"]):
+                    continue
+                if _try_select(row, allow_background=False):
+                    family_anchor_taken = True
+                    break
+            if not family_anchor_taken:
+                continue
+            for row in rows_in_family:
+                if len(selected_rows) >= limit:
+                    break
+                if row["role"] != "bridge":
+                    continue
+                if _try_select(row, allow_background=False):
+                    break
 
         for row in locked_support_rows:
+            if len(selected_rows) >= limit:
+                break
+            _try_select(row, allow_background=False)
+
+        for row in answer_rows:
             if len(selected_rows) >= limit:
                 break
             _try_select(row, allow_background=False)
@@ -1841,6 +2366,52 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 break
             _try_select(row, allow_background=False)
 
+        for row in chain_seed_rows:
+            if len(selected_rows) >= limit:
+                break
+            _try_select(row, allow_background=False)
+
+        ordered_chain_ids = []
+        for row in prepared_rows:
+            chain_id = row.get("primary_chain_id")
+            if chain_id and chain_id not in ordered_chain_ids:
+                ordered_chain_ids.append(chain_id)
+
+        chain_bundle_cap = int(packing_settings.get("chain_bundle_cap", 1))
+        for chain_id in ordered_chain_ids:
+            if len(selected_rows) >= limit or chain_bundle_cap <= 0:
+                break
+            chain_rows = [row for row in prepared_rows if row.get("primary_chain_id") == chain_id]
+            if not chain_rows:
+                continue
+            bundle_limit = 1
+            if chain_bundle_cap > 1 and any(row.get("primary_chain_complete") for row in chain_rows):
+                bundle_limit = chain_bundle_cap
+            selected_in_bundle = 0
+
+            def _take_bundle_role(role_name: str) -> bool:
+                nonlocal selected_in_bundle
+                for row in chain_rows:
+                    if role_name == "answer":
+                        matches_role = row["role"] == "answer" or row.get("chain_support_candidate")
+                    else:
+                        matches_role = row["role"] == "bridge" or row.get("chain_bridge_candidate")
+                    if not matches_role:
+                        continue
+                    if _try_select(row, allow_background=False):
+                        selected_in_bundle += 1
+                        return True
+                return False
+
+            _take_bundle_role("answer")
+            if selected_in_bundle < bundle_limit:
+                _take_bundle_role("bridge")
+            if selected_in_bundle < bundle_limit:
+                for row in chain_rows:
+                    if _try_select(row, allow_background=False):
+                        selected_in_bundle += 1
+                    if selected_in_bundle >= bundle_limit:
+                        break
         if answer_rows:
             _try_select(answer_rows[0], allow_background=False)
         if len(selected_rows) < limit and bridge_rows:
@@ -1849,6 +2420,13 @@ If the user greets you or asks about your capabilities, you may respond naturall
         for row in prepared_rows:
             if len(selected_rows) >= limit:
                 break
+            if (
+                row["role"] == "bridge"
+                and not row["is_supporting_selected"]
+                and row["answer_signal"] < 0.92
+                and row["bridge_signal"] < float(packing_settings["weak_bridge_threshold"])
+            ):
+                weak_bridge_candidates_dropped += 1
             _try_select(row, allow_background=False)
 
         if len(selected_rows) < limit:
@@ -1884,7 +2462,31 @@ If the user greets you or asks about your capabilities, you may respond naturall
             final_hits.append(annotated_hit)
 
         compacted_hits, compacted_count = self._compact_generation_context_hits(final_hits)
+        chain_bundle_rows_kept = sum(
+            1
+            for row in selected_rows
+            if row.get("primary_chain_id") and row.get("primary_chain_complete")
+        )
         self._last_generation_compacted_count = compacted_count
+        self._last_generation_selection_debug = {
+            "chain_mode_selected": generation_chain_mode,
+            "chain_activation_reason": generation_chain_reason,
+            "bridge_budget_used": bridge_budget_used,
+            "chain_bundle_rows_kept": chain_bundle_rows_kept,
+            "weak_bridge_candidates_dropped": weak_bridge_candidates_dropped,
+            "final_context_bridge_fraction": round(
+                sum(1 for row in selected_rows if row["role"] == "bridge") / max(1, len(selected_rows)),
+                4,
+            ),
+            "final_context_direct_support_fraction": round(
+                sum(1 for row in selected_rows if row["role"] == "answer") / max(1, len(selected_rows)),
+                4,
+            ),
+            "chain_vs_standalone_mix": {
+                "chain_backed": sum(1 for row in selected_rows if row.get("primary_chain_id")),
+                "standalone": sum(1 for row in selected_rows if not row.get("primary_chain_id")),
+            },
+        }
         return compacted_hits[:limit]
 
     def _select_benchmark_generation_hits(
@@ -2082,16 +2684,23 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 seen_entities.add(lowered)
         relation_hints = self._derive_planner_focus_hints(query, query_graph)
         fallback_queries = self._generic_bridge_follow_up_queries(query, hits, query_graph)
+        conditioned_queries = self._build_evidence_conditioned_follow_up_queries(
+            query,
+            hits,
+            relation_hints,
+            merged_entities,
+        )
 
         if not self.openai_client:
+            seeded_queries = self._merge_priority_queries(conditioned_queries, fallback_queries, limit=3)
             refined_queries = self._refine_bridge_queries_for_targeting(
                 query,
-                fallback_queries,
+                seeded_queries,
                 merged_entities,
                 relation_hints,
                 alias_candidates=alias_candidates,
-            ) or fallback_queries[:4]
-            return refined_queries
+            ) or seeded_queries[:3]
+            return refined_queries[:3]
 
         evidence_lines = []
         for hit in hits[:8]:
@@ -2147,14 +2756,14 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 queries.append(normalized)
                 seen.add(lowered)
             if queries:
-                for fallback_query in fallback_queries:
+                for fallback_query in conditioned_queries + fallback_queries:
                     lowered = fallback_query.lower()
                     if lowered in seen or lowered == query.lower():
                         continue
                     queries.append(fallback_query)
                     seen.add(lowered)
             else:
-                queries = fallback_queries[:]
+                queries = (conditioned_queries + fallback_queries)[:]
 
             refined = self._refine_bridge_queries_for_targeting(
                 query,
@@ -2163,19 +2772,20 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 relation_hints,
                 alias_candidates=alias_candidates,
             )
-            selected_queries = refined or fallback_queries[:4]
-            return selected_queries
+            selected_queries = refined or (conditioned_queries + fallback_queries)[:3]
+            return selected_queries[:3]
         except Exception as e:
             logger.warning("Benchmark follow-up planning failed: %s", str(e))
+            seeded_queries = self._merge_priority_queries(conditioned_queries, fallback_queries, limit=3)
             refined = self._refine_bridge_queries_for_targeting(
                 query,
-                fallback_queries,
+                seeded_queries,
                 merged_entities,
                 relation_hints,
                 alias_candidates=alias_candidates,
             )
-            selected_queries = refined or fallback_queries[:4]
-            return selected_queries
+            selected_queries = refined or seeded_queries[:3]
+            return selected_queries[:3]
 
     def _plan_benchmark_sub_queries(self, query: str) -> List[str]:
         if not self.openai_client:
@@ -2377,15 +2987,25 @@ If the user greets you or asks about your capabilities, you may respond naturall
         benchmark_generation_background_limit = int(
             os.getenv("NOVASEARCH_BENCHMARK_GENERATION_BACKGROUND_LIMIT", "1")
         )
-        enable_support_context_inheritance = os.getenv(
-            "ENABLE_SUPPORT_CONTEXT_INHERITANCE", "false"
-        ).lower() in {"1", "true", "yes"}
-        enable_early_second_hop = os.getenv("ENABLE_EARLY_SECOND_HOP", "false").lower() in {"1", "true", "yes"}
-        enable_bridge_planner = os.getenv("ENABLE_BRIDGE_PLANNER", "false").lower() in {"1", "true", "yes"}
-        enable_dual_head_scoring = os.getenv("ENABLE_DUAL_HEAD_SCORING", "false").lower() in {"1", "true", "yes"}
-        enable_retrieval_debug = os.getenv("ENABLE_RETRIEVAL_DEBUG", "true").lower() in {"1", "true", "yes"}
+        enable_support_context_inheritance = self._resolve_feature_flag(
+            "ENABLE_SUPPORT_CONTEXT_INHERITANCE", False
+        )
+        enable_early_second_hop = self._resolve_feature_flag(
+            "ENABLE_EARLY_SECOND_HOP", True
+        )
+        enable_bridge_planner = self._resolve_feature_flag(
+            "ENABLE_BRIDGE_PLANNER", bool(self.openai_client)
+        )
+        enable_dual_head_scoring = self._resolve_feature_flag(
+            "ENABLE_DUAL_HEAD_SCORING", False
+        )
+        enable_retrieval_debug = self._resolve_feature_flag(
+            "ENABLE_RETRIEVAL_DEBUG", True
+        )
         emit_debug_metadata = benchmark_mode or enable_retrieval_debug
         debug_metrics: Dict[str, Any] = {
+            "debug_schema_version": "chain-aware-v1",
+            "chain_aware_runtime_enabled": os.getenv("ENABLE_CHAIN_AWARE_RETRIEVAL", "true").lower() in {"1", "true", "yes"},
             "enable_support_context_inheritance": enable_support_context_inheritance,
             "enable_early_second_hop": enable_early_second_hop,
             "enable_bridge_planner": enable_bridge_planner,
@@ -2423,6 +3043,9 @@ If the user greets you or asks about your capabilities, you may respond naturall
             "generation_compacted_count": 0,
             "generation_source_type_mix": {},
             "generation_evidence_role_mix": {},
+            "generation_chain_mix": {},
+            "generation_chain_count": 0,
+            "supporting_inherited_chain_count": 0,
             "generation_uncorroborated_graph_count": 0,
         }
         
@@ -2472,35 +3095,51 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 else:
                     sub_queries = planner_result
 
-                if benchmark_mode and benchmark_generate_answer:
-                    planned_sub_queries = self._plan_benchmark_sub_queries(search_query)
-                    if planned_sub_queries:
-                        sub_queries = [search_query, *planned_sub_queries]
-                    sub_queries = self._augment_benchmark_sub_queries(search_query, sub_queries)
-                
             if len(sub_queries) > 1:
                 yield {"type": "thought", "content": f"Task decomposed into {len(sub_queries)} sub-queries: {sub_queries}"}
 
-            use_early_second_hop = enable_early_second_hop and (
-                (benchmark_mode and benchmark_generate_answer)
-                or self.retriever._is_multi_hop_query(search_query)
+            retrieval_top_k = max(top_k * 4, 16)
+            first_hop_pool = self.retriever.collect_candidate_pool(
+                search_query,
+                top_k=retrieval_top_k,
+                additional_queries=sub_queries[1:],
+                include_follow_ups=False
+            )
+            initial_hits = self.retriever.finalize_candidates(
+                search_query,
+                first_hop_pool,
+                top_k=retrieval_top_k,
+                query_graph=query_graph
+            )
+            debug_metrics["first_hop_candidates"] = len(first_hop_pool)
+            debug_metrics["planner_evidence_titles"] = [
+                ((hit.get("graph_context") or {}).get("doc_title") or hit.get("title") or "Unknown")
+                for hit in initial_hits[:8]
+            ]
+            initial_chain_mode = str(
+                ((self.retriever.last_search_debug or {}).get("chain_mode_selected") or "light")
+            ).lower()
+            debug_metrics["initial_chain_mode_selected"] = initial_chain_mode
+            debug_metrics["initial_chain_activation_reason"] = (
+                (self.retriever.last_search_debug or {}).get("chain_activation_reason")
             )
 
-            if use_early_second_hop:
-                retrieval_top_k = max(top_k * 4, 16)
-                first_hop_pool = self.retriever.collect_candidate_pool(
+            use_early_second_hop = False
+            second_hop_activation_reason = "disabled_by_flag"
+            if enable_early_second_hop:
+                use_early_second_hop, second_hop_activation_reason = self._should_use_early_second_hop(
                     search_query,
-                    top_k=retrieval_top_k,
-                    additional_queries=sub_queries[1:],
-                    include_follow_ups=False
+                    sub_queries,
+                    query_graph,
+                    initial_hits,
+                    initial_chain_mode,
                 )
-                debug_metrics["first_hop_candidates"] = len(first_hop_pool)
-                debug_metrics["planner_evidence_titles"] = [
-                    ((hit.get("graph_context") or {}).get("doc_title") or hit.get("title") or "Unknown")
-                    for hit in first_hop_pool[:8]
-                ]
-                bridge_entity_candidates = self._extract_planner_bridge_candidates(search_query, first_hop_pool)
-                alias_bridge_candidates = self._extract_alias_bridge_candidates(search_query, first_hop_pool)
+            debug_metrics["second_hop_activation_reason"] = second_hop_activation_reason
+
+            if use_early_second_hop:
+                bridge_evidence = initial_hits[: min(len(initial_hits), max(8, top_k * 2))]
+                bridge_entity_candidates = self._extract_planner_bridge_candidates(search_query, bridge_evidence)
+                alias_bridge_candidates = self._extract_alias_bridge_candidates(search_query, bridge_evidence)
                 merged_bridge_entities = []
                 seen_bridge_entities = set()
                 for candidate in [*bridge_entity_candidates, *alias_bridge_candidates]:
@@ -2514,7 +3153,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 bridge_queries = (
                     self._plan_benchmark_follow_up_queries(
                         search_query,
-                        first_hop_pool,
+                        bridge_evidence,
                         query_graph=query_graph,
                         precomputed_entities=bridge_entity_candidates,
                         precomputed_aliases=alias_bridge_candidates,
@@ -2522,7 +3161,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
                     if enable_bridge_planner
                     else self._deterministic_bridge_follow_up_queries(
                         search_query,
-                        first_hop_pool,
+                        bridge_evidence,
                         query_graph=query_graph
                     )
                 )
@@ -2539,7 +3178,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
                     search_query,
                     top_k=retrieval_top_k,
                     additional_queries=sub_queries[1:] + bridge_queries,
-                    include_follow_ups=False
+                    include_follow_ups=False,
                 )
                 first_hop_keys = {
                     (hit.get("doc_id"), hit.get("chunk_index"))
@@ -2567,18 +3206,8 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 debug_metrics["answer_bearing_bridge_hits"] = targeting_summary["answer_bearing_bridge_hits"]
                 debug_metrics["bridge_entity_family_chunk_miss"] = targeting_summary["bridge_entity_family_chunk_miss"]
             else:
-                all_hits = self.retriever.search(
-                    search_query,
-                    top_k=top_k,
-                    query_graph=query_graph,
-                    additional_queries=sub_queries[1:]
-                )
-                debug_metrics["first_hop_candidates"] = (
-                    (self.retriever.last_search_debug or {}).get("candidate_pool_count", len(all_hits))
-                )
-                debug_metrics["merged_candidate_count"] = (
-                    (self.retriever.last_search_debug or {}).get("candidate_pool_count", len(all_hits))
-                )
+                all_hits = initial_hits[:]
+                debug_metrics["merged_candidate_count"] = len(first_hop_pool)
             debug_metrics.update(self.retriever.last_search_debug or {})
             seen_chunk_ids = {
                 f"{hit.get('doc_id')}_{hit.get('chunk_index')}"
@@ -2785,6 +3414,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
             from agent.consistency import ConsistencyEvaluator
             evaluator = ConsistencyEvaluator(self.openai_client)
             supporting_hits_override: Optional[List[Dict[str, Any]]] = None
+            projected_benchmark_answer = ""
 
             if not self.client:
                 fallback_answer = (
@@ -2996,6 +3626,13 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 # Post-stream consistency evaluation
                 eval_result = evaluator.evaluate(final_answer, context_str)
             
+            if benchmark_mode and benchmark_generate_answer:
+                projected_benchmark_answer = self._generate_benchmark_short_answer(
+                    query,
+                    context_str,
+                    final_answer,
+                )
+
             # Save new turn to Semantic Memory
             self.memory.add_message(sid, "user", query)
             self.memory.add_message(sid, "assistant", final_answer)
@@ -3017,6 +3654,7 @@ If the user greets you or asks about your capabilities, you may respond naturall
                 "session_id": sid,
                 "consistency_score": eval_result["consistency_score"],
                 "hallucination_warning": eval_result["hallucination_warning"],
+                "benchmark_answer": projected_benchmark_answer if benchmark_mode and benchmark_generate_answer else None,
                 "retrieval_contexts": retrieval_hits_for_metadata if benchmark_mode and benchmark_generate_answer else None,
                 "generation_contexts": generation_hits_for_metadata if benchmark_mode and benchmark_generate_answer else None,
                 "debug_metrics": debug_metrics if emit_debug_metadata else None

@@ -14,8 +14,8 @@ import json
 import logging
 import re
 import math
-from collections import Counter
-from typing import List, Dict, Any, Optional
+from collections import Counter, defaultdict
+from typing import List, Dict, Any, Optional, Set, Tuple
 
 try:
     from dotenv import load_dotenv
@@ -543,6 +543,448 @@ class HybridSearchCoordinator:
             return "graph_enriched"
         return "unknown"
 
+    def _extract_hit_entity_terms(self, hit: Dict[str, Any]) -> Set[str]:
+        title = ((hit.get("graph_context") or {}).get("doc_title") or hit.get("title") or "").strip()
+        text = hit.get("chunk_text", "") or ""
+        candidates: List[str] = []
+        if title:
+            candidates.append(title)
+
+        raw_text = f"{title}\n{text}".strip()
+        if raw_text:
+            if hasattr(self, "nlp") and self.nlp:
+                try:
+                    doc = self.nlp(raw_text)
+                    candidates.extend(
+                        ent.text.strip()
+                        for ent in doc.ents
+                        if ent.label_ in {"PERSON", "ORG", "GPE", "LOC", "PRODUCT", "EVENT", "WORK_OF_ART"}
+                    )
+                except Exception:
+                    pass
+            if not candidates:
+                candidates.extend(
+                    match.strip()
+                    for match in re.findall(r"(?:[A-Z][A-Za-z'`-]+(?:\s+[A-Z][A-Za-z'`()-]+){0,5})", raw_text)
+                )
+
+        entity_terms: Set[str] = set()
+        for candidate in candidates:
+            entity_terms.update(self._normalize_terms(candidate))
+        return entity_terms
+
+    def _build_candidate_chains(
+        self,
+        query: str,
+        candidates: List[Dict[str, Any]],
+        chain_mode: str = "full",
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        if not candidates:
+            return [], {
+                "candidate_chains": 0,
+                "selected_chains": 0,
+                "chain_lengths": [],
+                "path_score_distribution": [],
+                "chain_support_coverage_score": 0.0,
+                "chain_bridge_coverage_score": 0.0,
+            }
+        if chain_mode == "bypass":
+            return candidates, {
+                "candidate_chains": 0,
+                "selected_chains": 0,
+                "chain_lengths": [],
+                "path_score_distribution": [],
+                "chain_support_coverage_score": 0.0,
+                "chain_bridge_coverage_score": 0.0,
+            }
+        if os.getenv("ENABLE_CHAIN_AWARE_RETRIEVAL", "true").lower() not in {"1", "true", "yes"}:
+            return candidates, {
+                "candidate_chains": 0,
+                "selected_chains": 0,
+                "chain_lengths": [],
+                "path_score_distribution": [],
+                "chain_support_coverage_score": 0.0,
+                "chain_bridge_coverage_score": 0.0,
+            }
+
+        base_beam_size = max(2, int(os.getenv("CHAIN_BEAM_SIZE", "6")))
+        base_max_links_per_target = max(1, int(os.getenv("CHAIN_MAX_LINKS_PER_TARGET", "2")))
+        if chain_mode == "light":
+            beam_size = max(2, min(base_beam_size, 4))
+            max_links_per_target = 1
+            singleton_threshold = 0.38
+            linked_connection_threshold = 0.28
+            bridge_seed_threshold = 0.34
+            linked_bridge_threshold = 0.20
+        else:
+            beam_size = base_beam_size
+            max_links_per_target = base_max_links_per_target
+            singleton_threshold = 0.26
+            linked_connection_threshold = 0.14
+            bridge_seed_threshold = 0.22
+            linked_bridge_threshold = 0.12
+        query_lower = query.lower().strip()
+        query_terms = set(self._normalize_terms(query))
+        subject_terms = set()
+        for subject in self._extract_query_subject_candidates(query):
+            subject_terms.update(self._normalize_terms(subject))
+        focus_terms = self._extract_query_focus_terms(query)
+
+        prepared_rows: List[Dict[str, Any]] = []
+        for position, hit in enumerate(candidates):
+            title = ((hit.get("graph_context") or {}).get("doc_title") or hit.get("title") or "").strip()
+            body_text = hit.get("chunk_text", "") or ""
+            if "\n" in body_text:
+                body_text = body_text.split("\n", 1)[1]
+            title_terms = set(self._normalize_terms(title))
+            body_terms = set(self._normalize_terms(body_text))
+            combined_terms = title_terms | body_terms
+            retrieval_queries = [
+                rq.strip()
+                for rq in (hit.get("retrieval_queries") or [])
+                if isinstance(rq, str) and rq.strip()
+            ]
+            follow_up_queries = [
+                rq for rq in retrieval_queries
+                if rq.lower() != query_lower
+            ]
+            bridge_terms = set()
+            for follow_up in follow_up_queries:
+                bridge_terms.update(self._normalize_terms(follow_up))
+            query_overlap = len(combined_terms & query_terms)
+            focus_overlap = len(combined_terms & focus_terms)
+            bridge_overlap = len(combined_terms & bridge_terms)
+            subject_overlap = len(combined_terms & subject_terms)
+            base_score = _safe_numeric(
+                hit.get("final_rank_score"),
+                _safe_numeric(
+                    hit.get("cross_encoder_score"),
+                    _safe_numeric(hit.get("rrf_score"), _safe_numeric(hit.get("score", 0.0))),
+                ),
+            )
+            direct_signal = min(
+                1.0,
+                (0.14 * query_overlap) + (0.18 * focus_overlap) + (0.08 if subject_overlap else 0.0),
+            )
+            bridge_signal = min(
+                1.0,
+                (0.18 * bridge_overlap)
+                + (0.06 * len(title_terms & bridge_terms))
+                + (0.08 if follow_up_queries else 0.0),
+            )
+            source_type = self._infer_source_type(hit)
+            prepared_rows.append({
+                "hit": hit,
+                "key": (hit.get("doc_id"), hit.get("chunk_index")),
+                "title_key": title.lower() or f"{hit.get('doc_id')}_{hit.get('chunk_index')}",
+                "position": position,
+                "source_type": source_type,
+                "is_graph_like": self._is_graph_like_source(source_type),
+                "title_terms": title_terms,
+                "body_terms": body_terms,
+                "combined_terms": combined_terms,
+                "entity_terms": self._extract_hit_entity_terms(hit) | title_terms,
+                "follow_up_queries": follow_up_queries,
+                "bridge_terms": bridge_terms,
+                "direct_signal": direct_signal,
+                "bridge_signal": bridge_signal,
+                "base_score": base_score,
+                "path_seed_score": base_score + (0.42 * direct_signal) + (0.12 * focus_overlap),
+                "path_target_score": base_score + (0.34 * max(direct_signal, bridge_signal)) + (0.24 * bridge_signal),
+            })
+
+        chains: List[Dict[str, Any]] = []
+        seen_signatures = set()
+
+        def _register_chain(
+            members: List[Dict[str, Any]],
+            chain_type: str,
+            trigger_query: str = "",
+            connection_score: float = 0.0,
+        ) -> None:
+            if not members:
+                return
+            member_keys = tuple(member["key"] for member in members)
+            signature = (chain_type, member_keys, trigger_query.lower().strip())
+            if signature in seen_signatures:
+                return
+            seen_signatures.add(signature)
+            source_diversity = len({member["source_type"] for member in members})
+            bridge_strength = max(member["bridge_signal"] for member in members)
+            support_strength = max(member["direct_signal"] for member in members)
+            chain_score = sum(
+                member["path_seed_score"] if idx == 0 else member["path_target_score"]
+                for idx, member in enumerate(members)
+            )
+            chain_score += connection_score
+            chain_score += 0.08 * max(0, source_diversity - 1)
+            if any(member["is_graph_like"] for member in members) and connection_score < 0.18:
+                chain_score -= 0.18
+            complete = len(members) > 1 and bridge_strength >= 0.18 and support_strength >= 0.22
+            chains.append({
+                "chain_id": f"chain_{len(chains) + 1}",
+                "type": chain_type,
+                "trigger_query": trigger_query,
+                "members": members,
+                "length": len(members),
+                "score": chain_score,
+                "bridge_strength": bridge_strength,
+                "support_strength": support_strength,
+                "complete": complete,
+            })
+
+        singleton_candidates = sorted(
+            prepared_rows,
+            key=lambda row: (row["path_seed_score"], row["direct_signal"], -row["position"]),
+            reverse=True,
+        )
+        for row in singleton_candidates[: max(beam_size, 4 if chain_mode == "light" else 6)]:
+            if row["direct_signal"] >= singleton_threshold:
+                _register_chain([row], chain_type="singleton")
+
+        for target in prepared_rows:
+            candidate_anchors: List[Tuple[float, Dict[str, Any]]] = []
+            for anchor in prepared_rows:
+                if anchor["key"] == target["key"]:
+                    continue
+                follow_overlap = len(anchor["combined_terms"] & target["bridge_terms"])
+                entity_overlap = len(anchor["entity_terms"] & target["entity_terms"])
+                family_overlap = 1.0 if anchor["title_key"] == target["title_key"] else 0.0
+                subject_anchor = len(anchor["combined_terms"] & subject_terms)
+                focus_anchor = len(anchor["combined_terms"] & focus_terms)
+                connection_score = (
+                    (0.18 * follow_overlap)
+                    + (0.16 * entity_overlap)
+                    + (0.20 * family_overlap)
+                    + (0.06 * focus_anchor)
+                    + (0.04 * subject_anchor)
+                )
+                if target["follow_up_queries"]:
+                    if follow_overlap == 0 and entity_overlap == 0 and family_overlap == 0:
+                        continue
+                    connection_score += 0.08
+                elif target["is_graph_like"]:
+                    if entity_overlap == 0 and family_overlap == 0 and focus_anchor == 0:
+                        continue
+                else:
+                    continue
+                candidate_anchors.append((connection_score, anchor))
+
+            candidate_anchors.sort(
+                key=lambda item: (
+                    item[0] + item[1]["path_seed_score"],
+                    item[1]["direct_signal"],
+                    -item[1]["position"],
+                ),
+                reverse=True,
+            )
+            for connection_score, anchor in candidate_anchors[:max_links_per_target]:
+                if connection_score < linked_connection_threshold:
+                    continue
+                if target["bridge_signal"] < linked_bridge_threshold and anchor["direct_signal"] < 0.44:
+                    continue
+                trigger_query = target["follow_up_queries"][0] if target["follow_up_queries"] else ""
+                _register_chain([anchor, target], chain_type="linked", trigger_query=trigger_query, connection_score=connection_score)
+
+            if target["follow_up_queries"] and target["bridge_signal"] >= bridge_seed_threshold and not candidate_anchors:
+                _register_chain([target], chain_type="bridge_seed", trigger_query=target["follow_up_queries"][0])
+
+        chains.sort(key=lambda chain: chain["score"], reverse=True)
+        for rank, chain in enumerate(chains, start=1):
+            chain["rank"] = rank
+
+        memberships: Dict[Tuple[Any, Any], List[Dict[str, Any]]] = defaultdict(list)
+        selected_chain_ids = [chain["chain_id"] for chain in chains[:beam_size]]
+        for chain in chains:
+            for member_index, member in enumerate(chain["members"]):
+                member_role = "bridge" if member_index > 0 or member["bridge_signal"] >= member["direct_signal"] else "support"
+                memberships[member["key"]].append({
+                    "chain_id": chain["chain_id"],
+                    "rank": chain["rank"],
+                    "score": round(chain["score"], 4),
+                    "length": chain["length"],
+                    "complete": chain["complete"],
+                    "member_role": member_role,
+                    "bridge_strength": round(chain["bridge_strength"], 4),
+                    "support_strength": round(chain["support_strength"], 4),
+                    "selected": chain["chain_id"] in selected_chain_ids,
+                })
+
+        annotated_candidates: List[Dict[str, Any]] = []
+        for hit in candidates:
+            key = (hit.get("doc_id"), hit.get("chunk_index"))
+            chain_rows = sorted(
+                memberships.get(key, []),
+                key=lambda row: (row["score"], -row["rank"]),
+                reverse=True,
+            )
+            annotated_hit = dict(hit)
+            annotated_hit["candidate_chain_ids"] = [row["chain_id"] for row in chain_rows[:4]]
+            annotated_hit["primary_chain_id"] = chain_rows[0]["chain_id"] if chain_rows else None
+            annotated_hit["primary_chain_rank"] = chain_rows[0]["rank"] if chain_rows else None
+            annotated_hit["best_chain_score"] = chain_rows[0]["score"] if chain_rows else 0.0
+            annotated_hit["best_chain_length"] = chain_rows[0]["length"] if chain_rows else 1
+            annotated_hit["primary_chain_complete"] = chain_rows[0]["complete"] if chain_rows else False
+            annotated_hit["primary_chain_member_role"] = chain_rows[0]["member_role"] if chain_rows else None
+            annotated_hit["chain_selected"] = chain_rows[0]["selected"] if chain_rows else False
+            annotated_hit["chain_support_signal"] = max((row["support_strength"] for row in chain_rows), default=0.0)
+            annotated_hit["chain_bridge_signal"] = max((row["bridge_strength"] for row in chain_rows), default=0.0)
+            annotated_candidates.append(annotated_hit)
+
+        selected_chains = chains[:beam_size]
+        return annotated_candidates, {
+            "candidate_chains": len(chains),
+            "selected_chains": len(selected_chains),
+            "chain_lengths": [chain["length"] for chain in selected_chains],
+            "path_score_distribution": [round(chain["score"], 3) for chain in selected_chains[:8]],
+            "chain_support_coverage_score": round(
+                sum(chain["support_strength"] for chain in selected_chains) / max(1, len(selected_chains)),
+                4,
+            ),
+            "chain_bridge_coverage_score": round(
+                sum(chain["bridge_strength"] for chain in selected_chains) / max(1, len(selected_chains)),
+                4,
+            ),
+            "selected_chain_ids": selected_chain_ids,
+        }
+
+    def _decide_chain_mode(
+        self,
+        query: str,
+        reranked_hits: List[Dict[str, Any]],
+        query_graph: Optional[List[Dict[str, str]]] = None,
+        top_k: int = 5,
+    ) -> Dict[str, Any]:
+        query_terms = set(self._normalize_terms(query))
+        focus_terms = self._extract_query_focus_terms(query)
+        subject_terms = set()
+        for subject in self._extract_query_subject_candidates(query):
+            subject_terms.update(self._normalize_terms(subject))
+
+        considered_hits = reranked_hits[: max(8, top_k * 2)]
+        direct_scores: List[float] = []
+        bridge_scores: List[float] = []
+        base_scores: List[float] = []
+        unique_follow_ups = set()
+
+        for hit in considered_hits:
+            title = ((hit.get("graph_context") or {}).get("doc_title") or hit.get("title") or "").strip()
+            body_text = hit.get("chunk_text", "") or ""
+            if "\n" in body_text:
+                body_text = body_text.split("\n", 1)[1]
+            title_terms = set(self._normalize_terms(title))
+            body_terms = set(self._normalize_terms(body_text))
+            combined_terms = title_terms | body_terms
+
+            retrieval_queries = [
+                rq.strip() for rq in (hit.get("retrieval_queries") or [])
+                if isinstance(rq, str) and rq.strip()
+            ]
+            extra_queries = []
+            for retrieval_query in retrieval_queries:
+                if retrieval_query.lower() == query.lower():
+                    continue
+                query_tokens = self._normalize_terms(retrieval_query)
+                if not query_tokens or len(query_tokens) > 10:
+                    continue
+                extra_queries.append(retrieval_query)
+                unique_follow_ups.add(retrieval_query.lower())
+
+            bridge_terms = set()
+            for extra_query in extra_queries:
+                bridge_terms.update(self._normalize_terms(extra_query))
+
+            query_overlap = len(combined_terms & query_terms)
+            focus_overlap = len(combined_terms & focus_terms)
+            subject_overlap = len(combined_terms & subject_terms)
+            bridge_overlap = len(combined_terms & bridge_terms)
+            answer_bearing_overlap = len(body_terms & focus_terms)
+
+            direct_scores.append(
+                min(
+                    1.4,
+                    (0.14 * query_overlap)
+                    + (0.22 * focus_overlap)
+                    + (0.10 if subject_overlap else 0.0)
+                    + min(0.20, 0.08 * answer_bearing_overlap),
+                )
+            )
+            bridge_scores.append(
+                min(
+                    1.2,
+                    (0.18 * bridge_overlap)
+                    + (0.08 * len(extra_queries))
+                    + (0.06 if title_terms & bridge_terms else 0.0),
+                )
+            )
+            base_scores.append(
+                _safe_numeric(
+                    hit.get("final_rank_score"),
+                    _safe_numeric(hit.get("cross_encoder_score"), _safe_numeric(hit.get("score", 0.0))),
+                )
+            )
+
+        top_direct = max(direct_scores, default=0.0)
+        avg_top_direct = sum(sorted(direct_scores, reverse=True)[:3]) / max(1, min(3, len(direct_scores)))
+        avg_top_bridge = sum(sorted(bridge_scores, reverse=True)[:3]) / max(1, min(3, len(bridge_scores)))
+        strong_direct_hits = sum(1 for score in direct_scores[:5] if score >= 0.65)
+        graph_complexity = len(query_graph or [])
+        query_complexity = len(query_terms)
+        score_margin = 0.0
+        if len(base_scores) >= 3:
+            sorted_base_scores = sorted(base_scores, reverse=True)
+            score_margin = sorted_base_scores[0] - sorted_base_scores[2]
+
+        mode = "light"
+        reason = "mixed_evidence_profile"
+        if (
+            top_direct >= 0.82
+            and avg_top_direct >= 0.60
+            and strong_direct_hits >= 1
+            and avg_top_bridge < 0.14
+            and len(unique_follow_ups) == 0
+            and graph_complexity == 0
+            and query_complexity <= 12
+        ):
+            mode = "bypass"
+            reason = "simple_query_strong_direct_evidence"
+        elif (
+            top_direct >= 0.90
+            and avg_top_direct >= 0.72
+            and strong_direct_hits >= 2
+            and avg_top_bridge < 0.18
+            and len(unique_follow_ups) <= 1
+            and graph_complexity <= 1
+            and score_margin >= 0.10
+        ):
+            mode = "bypass"
+            reason = "strong_direct_evidence"
+        elif (
+            avg_top_bridge >= 0.26
+            or len(unique_follow_ups) >= 2
+            or graph_complexity >= 2
+            or (top_direct < 0.72 and len(unique_follow_ups) >= 1)
+        ):
+            mode = "full"
+            reason = "bridge_or_multi_step_pressure"
+        else:
+            mode = "light"
+            reason = "moderate_chain_benefit"
+
+        return {
+            "mode": mode,
+            "reason": reason,
+            "signals": {
+                "top_direct_score": round(top_direct, 4),
+                "avg_top_direct_score": round(avg_top_direct, 4),
+                "avg_top_bridge_score": round(avg_top_bridge, 4),
+                "strong_direct_hits": strong_direct_hits,
+                "follow_up_query_count": len(unique_follow_ups),
+                "query_graph_edges": graph_complexity,
+                "top_score_margin": round(score_margin, 4),
+            },
+        }
+
     def _is_near_duplicate_text(self, left_text: str, right_text: str) -> bool:
         left_terms = self._normalize_terms(left_text)[:40]
         right_terms = self._normalize_terms(right_text)[:40]
@@ -641,6 +1083,9 @@ class HybridSearchCoordinator:
         query: str,
         candidates: List[Dict[str, Any]],
         top_k: int,
+        chain_mode: str = "full",
+        chain_activation_reason: str = "mixed_evidence_profile",
+        chain_activation_signals: Optional[Dict[str, Any]] = None,
     ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
         if not candidates:
             return [], {
@@ -649,6 +1094,13 @@ class HybridSearchCoordinator:
                 "evidence_role_mix": {},
                 "bridge_coverage_score": 0.0,
                 "support_coverage_score": 0.0,
+                "bridge_chunks_kept": 0,
+                "bridge_chunks_dropped": 0,
+                "final_context_chain_mix": {},
+                "selected_chain_count": 0,
+                "chain_mode_selected": chain_mode,
+                "chain_activation_reason": chain_activation_reason,
+                "chain_activation_signals": chain_activation_signals or {},
             }
 
         query_terms = set(self._normalize_terms(query))
@@ -669,6 +1121,51 @@ class HybridSearchCoordinator:
         }
         role_priority = {"direct": 4, "bridge": 3, "graph": 2, "symbolic": 2, "background": 1}
         source_calibration = self._annotate_source_calibration(candidates)
+        chain_mode = (chain_mode or "full").lower()
+        chain_settings = {
+            "bypass": {
+                "chain_weight": 0.0,
+                "bridge_weight": 0.22,
+                "graph_weight": 0.18,
+                "bridge_cap": 0,
+                "background_cap": 0,
+                "chain_beam_budget": 0,
+                "chain_bundle_cap": 0,
+                "weak_bridge_threshold": 0.40,
+            },
+            "light": {
+                "chain_weight": 0.42,
+                "bridge_weight": 0.34,
+                "graph_weight": 0.24,
+                "bridge_cap": 1,
+                "background_cap": 0,
+                "chain_beam_budget": 1,
+                "chain_bundle_cap": 1,
+                "weak_bridge_threshold": 0.30,
+            },
+            "full": {
+                "chain_weight": 0.78,
+                "bridge_weight": 0.48,
+                "graph_weight": 0.34,
+                "bridge_cap": max(1, min(2, top_k // 2)),
+                "background_cap": max(1, max(1, top_k // 5)),
+                "chain_beam_budget": max(1, min(int(os.getenv("CHAIN_SELECTION_BUDGET", str(max(1, top_k // 2)))), top_k)),
+                "chain_bundle_cap": max(1, min(2, top_k)),
+                "weak_bridge_threshold": 0.22,
+            },
+        }.get(chain_mode, {})
+        if not chain_settings:
+            chain_mode = "full"
+            chain_settings = {
+                "chain_weight": 0.78,
+                "bridge_weight": 0.48,
+                "graph_weight": 0.34,
+                "bridge_cap": max(1, min(2, top_k // 2)),
+                "background_cap": max(1, max(1, top_k // 5)),
+                "chain_beam_budget": max(1, min(int(os.getenv("CHAIN_SELECTION_BUDGET", str(max(1, top_k // 2)))), top_k)),
+                "chain_bundle_cap": max(1, min(2, top_k)),
+                "weak_bridge_threshold": 0.22,
+            }
 
         rows: List[Dict[str, Any]] = []
         for position, hit in enumerate(candidates):
@@ -710,13 +1207,61 @@ class HybridSearchCoordinator:
             elif source_type in {"graph_expansion", "graph_enriched"}:
                 shared_entities = ((hit.get("graph_context") or {}).get("shared_entities") or [])
                 graph_confidence = min(0.55, 0.16 * len(shared_entities))
+            primary_chain_id = hit.get("primary_chain_id")
+            primary_chain_rank = int(hit.get("primary_chain_rank") or 0) if hit.get("primary_chain_rank") else 0
+            best_chain_score = _safe_numeric(hit.get("best_chain_score"), 0.0)
+            best_chain_length = int(hit.get("best_chain_length") or 1)
+            primary_chain_complete = bool(hit.get("primary_chain_complete"))
+            chain_selected = bool(hit.get("chain_selected"))
+            primary_chain_member_role = str(hit.get("primary_chain_member_role") or "").lower()
+            chain_support_signal = _safe_numeric(hit.get("chain_support_signal"), 0.0)
+            chain_bridge_signal = _safe_numeric(hit.get("chain_bridge_signal"), 0.0)
+            chain_bridge_candidate = bool(
+                primary_chain_id
+                and (
+                    primary_chain_member_role == "bridge"
+                    or (chain_bridge_signal >= 0.28 and best_chain_length > 1)
+                )
+            )
+            chain_support_candidate = bool(
+                primary_chain_id
+                and (
+                    primary_chain_member_role == "support"
+                    or chain_support_signal >= 0.24
+                )
+            )
+            if chain_bridge_candidate:
+                bridge_signal = max(
+                    bridge_signal,
+                    min(1.0, (0.52 * chain_bridge_signal) + (0.10 if primary_chain_complete else 0.0)),
+                )
+            if chain_support_candidate:
+                direct_signal = max(
+                    direct_signal,
+                    min(1.0, (0.48 * chain_support_signal) + (0.08 if primary_chain_complete else 0.0)),
+                )
+            chain_bonus = 0.0
+            if primary_chain_id:
+                chain_bonus += min(0.32, 0.06 * best_chain_length)
+                chain_bonus += min(0.18, 0.08 * max(0.0, best_chain_score - base_score))
+                if chain_selected:
+                    chain_bonus += 0.12
+                if primary_chain_complete:
+                    chain_bonus += 0.10
+            chain_bonus *= float(chain_settings["chain_weight"])
 
             role = "background"
             if source_type == "symbolic":
                 role = "symbolic"
+            elif primary_chain_member_role == "bridge" and chain_bridge_candidate and direct_signal < 0.95:
+                role = "bridge"
+            elif chain_bridge_candidate and bridge_signal >= max(0.24, direct_signal - 0.04):
+                role = "bridge"
             elif bridge_signal >= max(0.30, direct_signal + 0.08):
                 role = "bridge"
             elif direct_signal >= 0.42:
+                role = "direct"
+            elif chain_support_candidate and direct_signal >= 0.24:
                 role = "direct"
             elif source_type in {"graph_expansion", "graph_enriched"} and (direct_signal >= 0.2 or bridge_signal >= 0.2):
                 role = "graph"
@@ -730,18 +1275,25 @@ class HybridSearchCoordinator:
                 background_penalty += 0.22
             if self._is_graph_like_source(source_type) and focus_overlap == 0 and bridge_overlap == 0:
                 background_penalty += 0.14
+            if primary_chain_id and role == "background" and chain_bridge_signal < 0.18 and chain_support_signal < 0.22:
+                background_penalty += 0.10
 
             role_score = (
                 base_score
                 + (0.62 * direct_signal)
-                + (0.48 * bridge_signal)
-                + (0.34 * graph_confidence)
+                + (float(chain_settings["bridge_weight"]) * bridge_signal)
+                + (float(chain_settings["graph_weight"]) * graph_confidence)
+                + chain_bonus
                 + (0.18 * source_rank_fraction)
                 + (0.14 * distribution_score)
                 + source_prior.get(source_type, 0.0)
                 - (0.015 * position)
                 - background_penalty
             )
+            if chain_mode == "bypass" and role in {"bridge", "graph", "symbolic"} and direct_signal < 0.42:
+                role_score -= 0.32
+            elif chain_mode == "light" and role == "bridge" and direct_signal < 0.18 and bridge_signal < 0.42:
+                role_score -= 0.18
 
             rows.append({
                 "hit": hit,
@@ -755,6 +1307,17 @@ class HybridSearchCoordinator:
                 "bridge_signal": bridge_signal,
                 "source_rank_fraction": source_rank_fraction,
                 "distribution_score": distribution_score,
+                "primary_chain_id": primary_chain_id,
+                "primary_chain_rank": primary_chain_rank,
+                "best_chain_score": best_chain_score,
+                "best_chain_length": best_chain_length,
+                "primary_chain_complete": primary_chain_complete,
+                "chain_selected": chain_selected,
+                "primary_chain_member_role": primary_chain_member_role or None,
+                "chain_bridge_candidate": chain_bridge_candidate,
+                "chain_support_candidate": chain_support_candidate,
+                "chain_bonus": chain_bonus,
+                "has_follow_up_query": bool(bridge_terms),
                 "score": role_score,
             })
 
@@ -809,12 +1372,18 @@ class HybridSearchCoordinator:
         role_caps = {
             "symbolic": max(1, min(2, max(1, top_k // 6))),
             "graph": max(1, max(1, top_k // 4)),
-            "background": max(1, max(1, top_k // 5)),
+            "background": int(chain_settings["background_cap"]),
         }
+        if chain_mode == "bypass":
+            role_caps["symbolic"] = 0
+            role_caps["graph"] = 0
+        elif chain_mode == "light":
+            role_caps["graph"] = min(role_caps["graph"], 1)
+            role_caps["symbolic"] = min(role_caps["symbolic"], 1)
         source_caps = {
-            "symbolic": 1,
-            "graph_expansion": 1,
-            "graph_enriched": 1,
+            "symbolic": 0 if chain_mode == "bypass" else 1,
+            "graph_expansion": 0 if chain_mode == "bypass" else 1,
+            "graph_enriched": 0 if chain_mode == "bypass" else 1,
         }
 
         selected_rows: List[Dict[str, Any]] = []
@@ -822,8 +1391,14 @@ class HybridSearchCoordinator:
         title_counts: Dict[str, int] = {}
         role_counts = Counter()
         source_counts = Counter()
+        selected_family_direct: Set[str] = set()
+        selected_chain_roles: Dict[str, Set[str]] = defaultdict(set)
         selected_texts_by_title: Dict[str, List[str]] = {}
         duplicates_removed = 0
+        chain_beam_budget = int(chain_settings["chain_beam_budget"])
+        chain_bundle_cap = int(chain_settings.get("chain_bundle_cap", 1))
+        bridge_budget_cap = int(chain_settings["bridge_cap"])
+        bridge_budget_used = 0
 
         def _can_take(row: Dict[str, Any]) -> bool:
             if row["key"] in selected_keys:
@@ -847,25 +1422,174 @@ class HybridSearchCoordinator:
             if any(self._is_near_duplicate_text(row["text"], existing) for existing in existing_texts):
                 drop_reasons["near_duplicate"] += 1
                 return False
+            if row["role"] == "bridge" and not row["direct_signal"] >= 0.42:
+                if bridge_budget_cap <= 0:
+                    drop_reasons["bridge_budget"] += 1
+                    return False
+                if bridge_budget_used >= bridge_budget_cap:
+                    drop_reasons["bridge_budget"] += 1
+                    return False
+                chain_id = row.get("primary_chain_id")
+                family_direct_selected = row["title_key"] in selected_family_direct
+                chain_direct_selected = bool(
+                    chain_id and ("direct" in selected_chain_roles.get(chain_id, set()) or "support" in selected_chain_roles.get(chain_id, set()))
+                )
+                if not family_direct_selected and not chain_direct_selected:
+                    if not row.get("primary_chain_complete") or not row.get("is_corroborated"):
+                        drop_reasons["orphan_bridge"] += 1
+                        return False
+                if row["bridge_signal"] < float(chain_settings["weak_bridge_threshold"]):
+                    drop_reasons["weak_bridge"] += 1
+                    return False
+            if row["role"] == "background" and row["score"] < 0.96:
+                drop_reasons["weak_background"] += 1
+                return False
             return True
+
+        def _record_take(row: Dict[str, Any]) -> None:
+            nonlocal bridge_budget_used
+            selected_rows.append(row)
+            selected_keys.add(row["key"])
+            title_counts[row["title_key"]] = title_counts.get(row["title_key"], 0) + 1
+            role_counts[row["role"]] += 1
+            source_counts[row["source_type"]] += 1
+            selected_texts_by_title.setdefault(row["title_key"], []).append(row["text"])
+            if row["role"] == "direct":
+                selected_family_direct.add(row["title_key"])
+            if row.get("primary_chain_id"):
+                selected_chain_roles[row["primary_chain_id"]].add(row["role"])
+                if row.get("chain_support_candidate"):
+                    selected_chain_roles[row["primary_chain_id"]].add("support")
+            if row["role"] == "bridge" and row["direct_signal"] < 0.42:
+                bridge_budget_used += 1
+            if row["is_graph_like"]:
+                nonlocal_graph_state["graph_symbolic_kept"] += 1
+                if row["is_corroborated"]:
+                    nonlocal_graph_state["corroborated_graph_kept"] += 1
+
+        nonlocal_graph_state = {
+            "graph_symbolic_kept": 0,
+            "corroborated_graph_kept": 0,
+        }
+
+        title_family_rows: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        title_family_scores: Dict[str, float] = {}
+        for row in rows:
+            title_family_rows[row["title_key"]].append(row)
+        for title_key, family_rows in title_family_rows.items():
+            best_any = max(row["score"] for row in family_rows)
+            best_direct = max(
+                (
+                    row["score"]
+                    for row in family_rows
+                    if row["role"] == "direct" or row.get("chain_support_candidate")
+                ),
+                default=best_any - 0.24,
+            )
+            corroborated_count = sum(1 for row in family_rows if row.get("is_corroborated"))
+            source_diversity = len(title_family_sources.get(title_key, set()))
+            focus_hits = title_family_focus.get(title_key, 0)
+            family_support = title_family_supportive.get(title_key, 0)
+            title_family_scores[title_key] = (
+                (0.68 * best_direct)
+                + (0.32 * best_any)
+                + (0.10 * source_diversity)
+                + (0.06 * min(2, focus_hits))
+                + (0.04 * min(3, family_support))
+                + (0.05 * min(2, corroborated_count))
+            )
+
+        family_quota = max(2, min(top_k, max(2, (top_k // 2) + 1)))
+        ranked_families = sorted(title_family_scores.items(), key=lambda item: item[1], reverse=True)
+        for title_key, _ in ranked_families[:family_quota]:
+            family_rows = sorted(
+                title_family_rows[title_key],
+                key=lambda row: (
+                    row["role"] == "direct" or row.get("chain_support_candidate"),
+                    row.get("is_corroborated", False),
+                    row["score"],
+                ),
+                reverse=True,
+            )
+            family_anchor_taken = False
+            for row in family_rows:
+                if row["role"] not in {"direct", "bridge", "graph", "symbolic"} and not row.get("chain_support_candidate"):
+                    continue
+                if row["role"] != "direct" and not row.get("chain_support_candidate") and not row.get("is_corroborated"):
+                    continue
+                if _can_take(row):
+                    _record_take(row)
+                    family_anchor_taken = True
+                    break
+            if not family_anchor_taken:
+                continue
+            for row in family_rows:
+                if len(selected_rows) >= top_k:
+                    break
+                if row["role"] != "bridge":
+                    continue
+                if _can_take(row):
+                    _record_take(row)
+                    break
 
         for required_role in ("direct", "bridge"):
             for row in rows:
                 if row["role"] != required_role:
                     continue
                 if _can_take(row):
-                    selected_rows.append(row)
-                    selected_keys.add(row["key"])
-                    title_counts[row["title_key"]] = title_counts.get(row["title_key"], 0) + 1
-                    role_counts[row["role"]] += 1
-                    source_counts[row["source_type"]] += 1
-                    selected_texts_by_title.setdefault(row["title_key"], []).append(row["text"])
-                    if row["is_graph_like"]:
-                        graph_symbolic_kept += 1
-                        if row["is_corroborated"]:
-                            corroborated_graph_kept += 1
+                    _record_take(row)
                     break
 
+        ordered_chain_ids: List[str] = []
+        for row in rows:
+            chain_id = row.get("primary_chain_id")
+            if chain_id and chain_id not in ordered_chain_ids:
+                ordered_chain_ids.append(chain_id)
+        for chain_id in ordered_chain_ids[:chain_beam_budget]:
+            chain_rows = [
+                row for row in rows
+                if row.get("primary_chain_id") == chain_id
+            ]
+            chain_rows.sort(
+                key=lambda row: (
+                    row["role"] != "background",
+                    row.get("primary_chain_complete", False),
+                    row.get("chain_bonus", 0.0),
+                    row["score"],
+                ),
+                reverse=True,
+            )
+            bundle_limit = 1
+            if chain_bundle_cap > 1 and any(row.get("primary_chain_complete") for row in chain_rows):
+                bundle_limit = chain_bundle_cap
+
+            selected_in_bundle = 0
+
+            def _take_chain_role(role_name: str) -> bool:
+                nonlocal selected_in_bundle
+                for row in chain_rows:
+                    if role_name == "direct":
+                        matches_role = row["role"] == "direct" or row.get("chain_support_candidate")
+                    else:
+                        matches_role = row["role"] == "bridge" or row.get("chain_bridge_candidate")
+                    if not matches_role:
+                        continue
+                    if _can_take(row):
+                        _record_take(row)
+                        selected_in_bundle += 1
+                        return True
+                return False
+
+            _take_chain_role("direct")
+            if selected_in_bundle < bundle_limit:
+                _take_chain_role("bridge")
+            if selected_in_bundle < bundle_limit:
+                for row in chain_rows:
+                    if _can_take(row):
+                        _record_take(row)
+                        selected_in_bundle += 1
+                    if selected_in_bundle >= bundle_limit:
+                        break
         for row in rows:
             if len(selected_rows) >= top_k:
                 break
@@ -874,18 +1598,11 @@ class HybridSearchCoordinator:
                 if row["is_graph_like"]:
                     graph_symbolic_dropped += 1
                 continue
-            selected_rows.append(row)
-            selected_keys.add(row["key"])
-            title_counts[row["title_key"]] = title_counts.get(row["title_key"], 0) + 1
-            role_counts[row["role"]] += 1
-            source_counts[row["source_type"]] += 1
-            selected_texts_by_title.setdefault(row["title_key"], []).append(row["text"])
-            if row["is_graph_like"]:
-                graph_symbolic_kept += 1
-                if row["is_corroborated"]:
-                    corroborated_graph_kept += 1
+            _record_take(row)
 
         selected_rows = selected_rows[:top_k]
+        graph_symbolic_kept = nonlocal_graph_state["graph_symbolic_kept"]
+        corroborated_graph_kept = nonlocal_graph_state["corroborated_graph_kept"]
         selected_hits = []
         for row in selected_rows:
             annotated_hit = dict(row["hit"])
@@ -895,11 +1612,73 @@ class HybridSearchCoordinator:
             annotated_hit["is_corroborated"] = row.get("is_corroborated", False)
             annotated_hit["source_rank_fraction"] = row.get("source_rank_fraction", 0.5)
             annotated_hit["distribution_score"] = row.get("distribution_score", 0.5)
+            annotated_hit["chain_mode_selected"] = chain_mode
+            annotated_hit["chain_activation_reason"] = chain_activation_reason
             selected_hits.append(annotated_hit)
         source_mix = dict(Counter(row["source_type"] for row in selected_rows))
         role_mix = dict(Counter(row["role"] for row in selected_rows))
         bridge_coverage_score = sum(row["bridge_signal"] for row in selected_rows) / max(1, len(selected_rows))
         support_coverage_score = sum(row["direct_signal"] for row in selected_rows) / max(1, len(selected_rows))
+        bridge_chunks_kept = sum(1 for row in selected_rows if row["role"] == "bridge" and row.get("primary_chain_id"))
+        bridge_chunks_dropped = sum(
+            1
+            for row in rows
+            if row["role"] == "bridge"
+            and row.get("primary_chain_id")
+            and row["key"] not in selected_keys
+        )
+        final_context_chain_mix = dict(
+            Counter(
+                (
+                    f"chain_{min(max(int(row.get('primary_chain_rank') or 1), 1), 3)}"
+                    if row.get("primary_chain_id") else "no_chain"
+                )
+                for row in selected_rows
+            )
+        )
+        selected_chain_count = len({
+            row.get("primary_chain_id")
+            for row in selected_rows
+            if row.get("primary_chain_id")
+        })
+        chain_bundle_rows_kept = sum(
+            1
+            for row in selected_rows
+            if row.get("primary_chain_id") and row.get("primary_chain_complete")
+        )
+        second_hop_candidates_added = sum(1 for row in rows if row["has_follow_up_query"])
+        second_hop_candidates_kept = sum(1 for row in selected_rows if row["has_follow_up_query"])
+        weak_bridge_candidates_dropped = sum(
+            1
+            for row in rows
+            if row["role"] == "bridge"
+            and row["key"] not in selected_keys
+            and row["bridge_signal"] < float(chain_settings["weak_bridge_threshold"])
+        )
+        final_context_bridge_fraction = (
+            sum(1 for row in selected_rows if row["role"] == "bridge") / max(1, len(selected_rows))
+        )
+        final_context_direct_support_fraction = (
+            sum(1 for row in selected_rows if row["role"] == "direct") / max(1, len(selected_rows))
+        )
+        chain_vs_standalone_mix = {
+            "chain_backed": sum(1 for row in selected_rows if row.get("primary_chain_id")),
+            "standalone": sum(1 for row in selected_rows if not row.get("primary_chain_id")),
+        }
+        if selected_rows:
+            chain_score_components = {
+                "avg_direct_signal": round(sum(row["direct_signal"] for row in selected_rows) / len(selected_rows), 4),
+                "avg_bridge_signal": round(sum(row["bridge_signal"] for row in selected_rows) / len(selected_rows), 4),
+                "avg_chain_bonus": round(sum(row["chain_bonus"] for row in selected_rows) / len(selected_rows), 4),
+                "avg_selected_score": round(sum(row["score"] for row in selected_rows) / len(selected_rows), 4),
+            }
+        else:
+            chain_score_components = {
+                "avg_direct_signal": 0.0,
+                "avg_bridge_signal": 0.0,
+                "avg_chain_bonus": 0.0,
+                "avg_selected_score": 0.0,
+            }
 
         return selected_hits, {
             "duplicates_removed": duplicates_removed,
@@ -907,6 +1686,11 @@ class HybridSearchCoordinator:
             "evidence_role_mix": role_mix,
             "bridge_coverage_score": round(bridge_coverage_score, 4),
             "support_coverage_score": round(support_coverage_score, 4),
+            "bridge_chunks_kept": bridge_chunks_kept,
+            "bridge_chunks_dropped": bridge_chunks_dropped,
+            "final_context_chain_mix": final_context_chain_mix,
+            "selected_chain_count": selected_chain_count,
+            "chain_bundle_rows_kept": chain_bundle_rows_kept,
             "role_aware_pool_count": len(rows),
             "role_aware_selected_count": len(selected_rows),
             "graph_symbolic_candidates": graph_symbolic_candidates,
@@ -914,6 +1698,17 @@ class HybridSearchCoordinator:
             "graph_symbolic_dropped": graph_symbolic_dropped,
             "corroborated_graph_kept": corroborated_graph_kept,
             "selection_drop_reasons": dict(drop_reasons),
+            "chain_mode_selected": chain_mode,
+            "chain_activation_reason": chain_activation_reason,
+            "chain_activation_signals": chain_activation_signals or {},
+            "second_hop_candidates_added": second_hop_candidates_added,
+            "second_hop_candidates_kept": second_hop_candidates_kept,
+            "bridge_budget_used": bridge_budget_used,
+            "weak_bridge_candidates_dropped": weak_bridge_candidates_dropped,
+            "final_context_bridge_fraction": round(final_context_bridge_fraction, 4),
+            "final_context_direct_support_fraction": round(final_context_direct_support_fraction, 4),
+            "chain_score_components": chain_score_components,
+            "chain_vs_standalone_mix": chain_vs_standalone_mix,
         }
 
     def collect_candidate_pool(
@@ -1065,6 +1860,17 @@ class HybridSearchCoordinator:
                 logger.info("Injecting %d symbolic paths from Neo4j after selectivity gate.", len(deep_hits))
 
         combined_candidates = [*deep_hits, *grounded_candidates]
+        chain_decision = self._decide_chain_mode(
+            query=query,
+            reranked_hits=reranked_hits,
+            query_graph=query_graph,
+            top_k=top_k,
+        )
+        combined_candidates, chain_debug = self._build_candidate_chains(
+            query,
+            combined_candidates,
+            chain_mode=chain_decision.get("mode", "full"),
+        )
         pre_source_mix = dict(Counter(self._infer_source_type(hit) for hit in combined_candidates))
 
         # 6. Role-aware final evidence selection.
@@ -1072,6 +1878,9 @@ class HybridSearchCoordinator:
             query=query,
             candidates=combined_candidates,
             top_k=top_k,
+            chain_mode=chain_decision.get("mode", "full"),
+            chain_activation_reason=chain_decision.get("reason", "mixed_evidence_profile"),
+            chain_activation_signals=chain_decision.get("signals", {}),
         )
         self.last_search_debug = {
             **self.last_search_debug,
@@ -1082,12 +1891,25 @@ class HybridSearchCoordinator:
             "graph_expansion_enriched": graph_expansion_enriched,
             "dynamic_cypher_added": len(deep_hits),
             "symbolic_triggered": symbolic_triggered,
+            "chain_mode_selected": role_debug.get("chain_mode_selected", chain_decision.get("mode", "full")),
+            "chain_activation_reason": role_debug.get("chain_activation_reason", chain_decision.get("reason", "mixed_evidence_profile")),
+            "chain_activation_signals": role_debug.get("chain_activation_signals", chain_decision.get("signals", {})),
+            "candidate_chains": chain_debug.get("candidate_chains", 0),
+            "selected_chains": chain_debug.get("selected_chains", 0),
+            "chain_lengths": chain_debug.get("chain_lengths", []),
+            "path_score_distribution": chain_debug.get("path_score_distribution", []),
+            "chain_support_coverage_score": chain_debug.get("chain_support_coverage_score", 0.0),
+            "chain_bridge_coverage_score": chain_debug.get("chain_bridge_coverage_score", 0.0),
             "source_type_mix_pre": pre_source_mix,
             "source_type_mix": role_debug.get("source_type_mix", {}),
             "evidence_role_mix": role_debug.get("evidence_role_mix", {}),
             "duplicates_removed": role_debug.get("duplicates_removed", 0),
             "bridge_coverage_score": role_debug.get("bridge_coverage_score", 0.0),
             "support_coverage_score": role_debug.get("support_coverage_score", 0.0),
+            "bridge_chunks_kept": role_debug.get("bridge_chunks_kept", 0),
+            "bridge_chunks_dropped": role_debug.get("bridge_chunks_dropped", 0),
+            "final_context_chain_mix": role_debug.get("final_context_chain_mix", {}),
+            "selected_chain_count": role_debug.get("selected_chain_count", 0),
             "final_context_count": len(selected_hits),
             "post_pack_count": len(selected_hits),
             "role_aware_pool_count": role_debug.get("role_aware_pool_count", len(combined_candidates)),
@@ -1097,6 +1919,15 @@ class HybridSearchCoordinator:
             "graph_symbolic_dropped": role_debug.get("graph_symbolic_dropped", 0),
             "corroborated_graph_kept": role_debug.get("corroborated_graph_kept", 0),
             "selection_drop_reasons": role_debug.get("selection_drop_reasons", {}),
+            "chain_bypassed_cases": 1 if role_debug.get("chain_mode_selected") == "bypass" else 0,
+            "second_hop_candidates_added": role_debug.get("second_hop_candidates_added", 0),
+            "second_hop_candidates_kept": role_debug.get("second_hop_candidates_kept", 0),
+            "bridge_budget_used": role_debug.get("bridge_budget_used", 0),
+            "weak_bridge_candidates_dropped": role_debug.get("weak_bridge_candidates_dropped", 0),
+            "final_context_bridge_fraction": role_debug.get("final_context_bridge_fraction", 0.0),
+            "final_context_direct_support_fraction": role_debug.get("final_context_direct_support_fraction", 0.0),
+            "chain_score_components": role_debug.get("chain_score_components", {}),
+            "chain_vs_standalone_mix": role_debug.get("chain_vs_standalone_mix", {}),
         }
 
         return selected_hits[:top_k]

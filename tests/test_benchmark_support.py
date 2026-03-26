@@ -13,6 +13,7 @@ from tests.benchmark_support import (
     normalize_benchmark_name,
     token_f1_score,
 )
+from tests.ragas_support import RagasEvaluationResult
 
 
 class FakeDataset:
@@ -60,28 +61,66 @@ def _fake_load_dataset(*args, **kwargs):
             ]
         )
 
-    if name == "Hyukkyu/beir-nq" and config == "queries" and split == "train":
+    if name == "squad" and split == "validation":
         return FakeDataset(
             [
-                {"_id": "q1", "text": "what is non controlling interest on balance sheet"},
-                {"_id": "q2", "text": "who wrote the hobbit"},
+                {
+                    "id": "s1",
+                    "title": "Minority interest",
+                    "context": "Non controlling interest is also called minority interest.",
+                    "question": "what is non controlling interest on balance sheet",
+                    "answers": {"text": ["minority interest"]},
+                },
+                {
+                    "id": "s2",
+                    "title": "J. R. R. Tolkien",
+                    "context": "The Hobbit was written by J. R. R. Tolkien.",
+                    "question": "who wrote the hobbit",
+                    "answers": {"text": ["J. R. R. Tolkien"]},
+                },
             ]
         )
 
-    if name == "BeIR/nq-qrels" and split == "test":
+    if name == "cmriat/musique" and split == "validation":
         return FakeDataset(
             [
-                {"query-id": "q1", "corpus-id": "doc0", "score": 1},
-                {"query-id": "q2", "corpus-id": "doc1", "score": 1},
+                {
+                    "id": "m1",
+                    "question": "Who wrote The Hobbit and who was his spouse?",
+                    "answer": "Edith Tolkien",
+                    "answer_aliases": ["Edith Tolkien"],
+                    "paragraphs": [
+                        {
+                            "title": "The Hobbit",
+                            "paragraph_text": "The Hobbit is a novel written by J. R. R. Tolkien.",
+                        },
+                        {
+                            "title": "J. R. R. Tolkien",
+                            "paragraph_text": "Edith Tolkien was the spouse of J. R. R. Tolkien.",
+                        },
+                    ],
+                }
             ]
         )
 
-    if name == "Hyukkyu/beir-nq" and config == "corpus" and split == "train":
+    if name == "din0s/asqa" and split == "dev":
         return FakeDataset(
             [
-                {"_id": "doc0", "title": "Minority interest", "text": "Non controlling interest is also called minority interest."},
-                {"_id": "doc1", "title": "J. R. R. Tolkien", "text": "The Hobbit was written by J. R. R. Tolkien."},
-                {"_id": "doc2", "title": "Distractor", "text": "This is unrelated."},
+                {
+                    "sample_id": "a1",
+                    "ambiguous_question": "Where is Fort Presque Isle located?",
+                    "annotations": [
+                        {
+                            "long_answer": "Fort Presque Isle was located near present-day Erie, Pennsylvania.",
+                            "knowledge": [
+                                {
+                                    "wikipage": "Fort Presque Isle",
+                                    "content": "Fort Presque Isle was built near present-day Erie, Pennsylvania.",
+                                }
+                            ],
+                        }
+                    ],
+                }
             ]
         )
 
@@ -96,11 +135,14 @@ def test_normalize_answer_scores():
 
 def test_benchmark_name_defaults():
     assert normalize_benchmark_name("hotpot") == "hotpotqa"
-    assert normalize_benchmark_name("natural_questions") == "nq"
+    assert normalize_benchmark_name("squad2") == "squad_v2"
     assert default_split_for_benchmark("hotpotqa") == "validation"
-    assert default_split_for_benchmark("nq") == "test"
+    assert default_split_for_benchmark("squad") == "validation"
+    assert default_split_for_benchmark("squad_v2") == "validation"
+    assert default_split_for_benchmark("musique") == "validation"
+    assert default_split_for_benchmark("asqa") == "dev"
     assert default_trace_path("hotpotqa").endswith("docs/kpi_trace.json")
-    assert default_trace_path("nq").endswith("docs/kpi_trace_nq.json")
+    assert default_trace_path("squad").endswith("docs/kpi_trace_squad.json")
 
 
 def test_load_hotpot_bundle_from_adapter():
@@ -117,41 +159,67 @@ def test_load_hotpot_bundle_from_adapter():
     assert len(bundle.unique_pages) == 2
 
 
-def test_load_nq_bundle_from_adapter():
+def test_load_squad_bundle_from_adapter():
     bundle = load_benchmark_bundle(
-        "nq",
+        "squad",
         sample_size=2,
-        split="test",
+        split="validation",
         load_dataset_fn=_fake_load_dataset,
     )
-    assert bundle.display_name == "Natural Questions (BeIR/NQ)"
+    assert bundle.display_name == "SQuAD"
     assert len(bundle.cases) == 2
-    assert bundle.answer_metric_label is None
-    assert bundle.cases[0].expected_answers == []
+    assert bundle.answer_metric_label == "Ragas answer metrics"
+    assert bundle.cases[0].expected_answers
     assert bundle.cases[0].expected_titles
-    assert {page.ref_id for page in bundle.unique_pages} == {"doc0", "doc1"}
+    assert len(bundle.unique_pages) == 2
 
 
-def test_build_summary_payload_handles_answerless_benchmark():
-    bundle = BenchmarkBundle(
-        name="nq",
-        display_name="Natural Questions (BeIR/NQ)",
-        split="test",
+def test_load_musique_bundle_from_adapter():
+    bundle = load_benchmark_bundle(
+        "musique",
         sample_size=1,
-        retrieval_metric_label="Relevant Passage Title Hit/MRR",
-        answer_metric_label=None,
+        split="validation",
+        load_dataset_fn=_fake_load_dataset,
+    )
+    assert bundle.display_name == "MuSiQue"
+    assert len(bundle.cases) == 1
+    assert bundle.cases[0].expected_answers == ["Edith Tolkien"]
+    assert len(bundle.cases[0].pages) == 2
+
+
+def test_load_asqa_bundle_from_adapter():
+    bundle = load_benchmark_bundle(
+        "asqa",
+        sample_size=1,
+        split="dev",
+        load_dataset_fn=_fake_load_dataset,
+    )
+    assert bundle.display_name == "ASQA"
+    assert len(bundle.cases) == 1
+    assert "Pennsylvania" in bundle.cases[0].expected_answers[0]
+    assert bundle.cases[0].pages[0].title == "Fort Presque Isle"
+
+
+def test_build_summary_payload_uses_ragas_summary_schema():
+    bundle = BenchmarkBundle(
+        name="squad",
+        display_name="SQuAD",
+        split="validation",
+        sample_size=1,
+        retrieval_metric_label="Ragas context metrics only",
+        answer_metric_label="Ragas answer metrics",
         cases=[
             BenchmarkCase(
                 idx=0,
                 query="who wrote the hobbit",
-                expected_answers=[],
+                expected_answers=["J. R. R. Tolkien"],
                 expected_titles=["J. R. R. Tolkien"],
                 pages=[
                     BenchmarkPage(
                         ref_id="doc1",
                         title="J. R. R. Tolkien",
                         text="J. R. R. Tolkien\nThe Hobbit was written by J. R. R. Tolkien.",
-                        section="NQ Benchmark doc1",
+                        section="SQuAD Benchmark doc1",
                     )
                 ],
             )
@@ -161,33 +229,23 @@ def test_build_summary_payload_handles_answerless_benchmark():
                 ref_id="doc1",
                 title="J. R. R. Tolkien",
                 text="J. R. R. Tolkien\nThe Hobbit was written by J. R. R. Tolkien.",
-                section="NQ Benchmark doc1",
+                section="SQuAD Benchmark doc1",
             )
         ],
         total_raw_tokens=20.0,
-        notes=["No gold answers in this package."],
+        notes=["Ragas-only benchmark summary."],
     )
     results = [
         {
-            "mrr": 1.0,
-            "hr5": 1.0,
-            "retrieved_tokens": 10.0,
-            "faith_score": 0.9,
-            "legacy_cp_score": 0.8,
-            "generation_cp_score": 0.7,
-            "supporting_cp_score": 0.6,
-            "generation_audit": {"counts": {"direct-answer": 1, "bridge-useful": 0, "background": 0, "noise": 0}},
-            "supporting_audit": {"counts": {"direct-answer": 1, "bridge-useful": 0, "background": 0, "noise": 0}},
-            "was_evaled": True,
-            "eval_invalid_reason": None,
             "answer": "J. R. R. Tolkien",
-            "answer_em": None,
-            "answer_f1": None,
             "retrieval_contexts": ["J. R. R. Tolkien\nThe Hobbit was written by J. R. R. Tolkien."],
             "generation_contexts": ["J. R. R. Tolkien\nThe Hobbit was written by J. R. R. Tolkien."],
             "supporting_contexts": ["J. R. R. Tolkien\nThe Hobbit was written by J. R. R. Tolkien."],
+            "reference_contexts": ["J. R. R. Tolkien\nThe Hobbit was written by J. R. R. Tolkien."],
+            "retrieval_token_estimate": 10.0,
+            "generation_token_estimate": 10.0,
             "expected_titles": ["J. R. R. Tolkien"],
-            "expected_answers": [],
+            "expected_answers": ["J. R. R. Tolkien"],
             "query": "who wrote the hobbit",
             "debug_metrics": {"final_context_count": 1},
             "planner_confirmed_generation_count": 0,
@@ -208,17 +266,56 @@ def test_build_summary_payload_handles_answerless_benchmark():
             "evidence_role_mix": {"answer": 1},
         }
     ]
+    ragas_result = RagasEvaluationResult(
+        sample_rows=[
+            {
+                **results[0],
+                "ragas_contexts": results[0]["generation_contexts"],
+                "ragas_ground_truth": "J. R. R. Tolkien",
+                "ragas_reference_contexts": results[0]["reference_contexts"],
+                "ragas_scores": {
+                    "context_precision": 1.0,
+                    "context_recall": 1.0,
+                    "context_entities_recall": 1.0,
+                    "faithfulness": 0.9,
+                    "answer_relevancy": 0.8,
+                    "noise_sensitivity": 0.1,
+                },
+                "ragas_metric_modes": {
+                    "context_precision": "llm_reference",
+                    "context_recall": "llm_reference",
+                    "context_entities_recall": "llm_reference",
+                    "faithfulness": "llm",
+                    "answer_relevancy": "llm_embeddings",
+                    "noise_sensitivity": "llm_reference",
+                },
+                "ragas_metric_skips": {},
+            }
+        ],
+        metrics_summary={
+            "context_precision": 1.0,
+            "context_recall": 1.0,
+            "context_entities_recall": 1.0,
+            "faithfulness": 0.9,
+            "answer_relevancy": 0.8,
+            "noise_sensitivity": 0.1,
+        },
+        metrics_applied={"context_precision": "llm_reference"},
+        metrics_skipped={},
+    )
     summary = build_summary_payload(
-        bundle,
-        results,
-        total_retrieved_tokens=10.0,
+        benchmark=bundle,
+        query_results=results,
+        ragas_result=ragas_result,
+        total_context_tokens=10.0,
         ingest_duration=1.0,
         query_duration=2.0,
-        generation_eval_enabled=True,
-        evaluator_model="gpt-4.1-mini",
-        eval_every_n=5,
+        context_mode="generation",
+        ragas_model="gpt-4.1-mini",
+        ragas_embedding_model="text-embedding-3-small",
     )
-    assert summary["benchmark_name"] == "nq"
-    assert summary["answer_em"] is None
-    assert summary["answer_metric_label"] is None
-    assert summary["hit_rate_5"] == 1.0
+    assert summary["benchmark_name"] == "squad"
+    assert summary["ragas_metrics"]["context_precision"] == 1.0
+    assert summary["ragas_context_mode"] == "generation"
+    assert summary["answer_em"] == 1.0
+    assert summary["answer_f1"] == 1.0

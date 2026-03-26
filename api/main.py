@@ -156,6 +156,7 @@ def ask_copilot(request: QueryRequest):
                         "sources": serialize_sources(chunk.get("sources", [])),
                         "retrieval_contexts": serialize_sources(chunk.get("retrieval_contexts", [])),
                         "generation_contexts": serialize_sources(chunk.get("generation_contexts", [])),
+                        "benchmark_answer": chunk.get("benchmark_answer"),
                         "debug_metrics": chunk.get("debug_metrics"),
                         "session_id": chunk.get("session_id"),
                         "consistency_score": chunk.get("consistency_score"),

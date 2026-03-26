@@ -237,26 +237,29 @@ Embeds your image into a 512-dimensional CLIP vector and retrieves the closest t
 ## Run Tests
 
 ```bash
-# Full test suite (21 tests)
+# Full test suite
 pytest tests/ -v --ignore=tests/benchmark_rag.py --ignore=tests/load_test.py
 
-# Benchmarks
+# Benchmarks (Ragas-based)
 python tests/benchmark_rag.py
 
-# HotpotQA 100-sample
-BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation python tests/benchmark_rag.py
+# HotpotQA 100-sample (generation contexts -> Ragas)
+BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=generation python tests/benchmark_rag.py
 
-# Natural Questions (BeIR/NQ) 100-sample
-BENCHMARK_NAME=nq BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=test python tests/benchmark_rag.py
+# HotpotQA 100-sample (retrieval contexts -> Ragas)
+BENCHMARK_NAME=hotpotqa BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=retrieval python tests/benchmark_rag.py
 
-# Larger run example
-BENCHMARK_NAME=nq BENCHMARK_SAMPLE_SIZE=500 BENCHMARK_SPLIT=test python tests/benchmark_rag.py
+# SQuAD 100-sample (generation contexts -> Ragas)
+BENCHMARK_NAME=squad BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=generation python tests/benchmark_rag.py
+
+# SQuAD 2.0 100-sample (retrieval contexts -> Ragas)
+BENCHMARK_NAME=squad_v2 BENCHMARK_SAMPLE_SIZE=100 BENCHMARK_SPLIT=validation BENCHMARK_CONTEXT_MODE=retrieval python tests/benchmark_rag.py
 
 # Load test
 python tests/load_test.py
 ```
 
-Natural Questions is integrated through a BeIR/NQ-style corpus + queries + qrels track rather than `nq_open`, so the benchmark remains honest to NovaSearch's ingestion-and-retrieval architecture. See [docs/nq_benchmark_integration.md](docs/nq_benchmark_integration.md).
+The benchmark runner now uses Ragas as the primary evaluation framework. Official metrics are reported through Ragas, while NovaSearch-specific chain/debug fields are preserved as side-channel diagnostics. See [docs/ragas_evaluation_migration.md](docs/ragas_evaluation_migration.md).
 
 ---
 

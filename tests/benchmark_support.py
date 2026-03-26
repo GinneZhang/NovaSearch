@@ -12,9 +12,40 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from datasets import load_dataset
+try:
+    import pandas as pd
+except ImportError:  # pragma: no cover
+    pd = None
 
 
 LoadDatasetFn = Callable[..., Any]
+
+
+def _to_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        converted = tolist()
+        if isinstance(converted, list):
+            return converted
+        if isinstance(converted, tuple):
+            return list(converted)
+        return [converted]
+    return [value]
+
+
+def _load_remote_parquet_rows(url: str, sample_size: int, seed: int) -> List[Dict[str, Any]]:
+    if pd is None:
+        raise RuntimeError("pandas is required for parquet-backed benchmark adapters.")
+    frame = pd.read_parquet(url)
+    if len(frame) > sample_size:
+        frame = frame.sample(n=sample_size, random_state=seed)
+    return frame.to_dict(orient="records")
 
 
 @dataclass
@@ -55,10 +86,12 @@ def normalize_benchmark_name(name: Optional[str]) -> str:
     aliases = {
         "hotpot": "hotpotqa",
         "hotpot_qa": "hotpotqa",
-        "nq": "nq",
-        "natural_questions": "nq",
-        "natural_questions_open": "nq_open",
-        "nq_open": "nq_open",
+        "musique_ans": "musique",
+        "mu_sique": "musique",
+        "squad2": "squad_v2",
+        "squad_2": "squad_v2",
+        "squad_2_0": "squad_v2",
+        "squad2_0": "squad_v2",
     }
     return aliases.get(normalized, normalized)
 
@@ -74,10 +107,14 @@ def default_split_for_benchmark(benchmark_name: str) -> str:
     normalized = normalize_benchmark_name(benchmark_name)
     if normalized == "hotpotqa":
         return "validation"
-    if normalized == "nq":
-        return "test"
-    if normalized == "nq_open":
+    if normalized == "squad":
         return "validation"
+    if normalized == "squad_v2":
+        return "validation"
+    if normalized == "musique":
+        return "validation"
+    if normalized == "asqa":
+        return "dev"
     raise ValueError(f"Unsupported benchmark '{benchmark_name}'")
 
 
@@ -169,10 +206,16 @@ def load_benchmark_bundle(
     resolved_cache_dir = cache_dir or os.getenv("BENCHMARK_DATASET_CACHE_DIR") or os.getenv("HF_DATASETS_CACHE") or "/tmp/hf_cache/datasets"
     if normalized == "hotpotqa":
         return _load_hotpotqa_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn)
-    if normalized == "nq":
-        return _load_beir_nq_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn)
+    if normalized == "squad":
+        return _load_squad_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn)
+    if normalized == "squad_v2":
+        return _load_squad_v2_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn)
+    if normalized == "musique":
+        return _load_musique_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn)
+    if normalized == "asqa":
+        return _load_asqa_bundle(sample_size, resolved_split, seed, resolved_cache_dir, load_dataset_fn)
     raise ValueError(
-        f"Unsupported benchmark '{benchmark_name}'. Supported benchmarks: hotpotqa, nq"
+        f"Unsupported benchmark '{benchmark_name}'. Supported benchmarks: hotpotqa, musique, asqa, squad, squad_v2"
     )
 
 
@@ -183,8 +226,16 @@ def _load_hotpotqa_bundle(
     cache_dir: str,
     load_dataset_fn: LoadDatasetFn,
 ) -> BenchmarkBundle:
-    ds = load_dataset_fn("hotpot_qa", "distractor", split=split, streaming=False, cache_dir=cache_dir)
-    subset = ds.shuffle(seed=seed).select(range(sample_size))
+    if load_dataset_fn is load_dataset:
+        parquet_split = "validation" if split == "validation" else split
+        subset = _load_remote_parquet_rows(
+            f"https://huggingface.co/datasets/hotpotqa/hotpot_qa/resolve/main/distractor/{parquet_split}-00000-of-00001.parquet",
+            sample_size=sample_size,
+            seed=seed,
+        )
+    else:
+        ds = load_dataset_fn("hotpot_qa", "distractor", split=split, streaming=False, cache_dir=cache_dir)
+        subset = ds.shuffle(seed=seed).select(range(sample_size))
 
     cases: List[BenchmarkCase] = []
     page_corpus: Dict[str, BenchmarkPage] = {}
@@ -240,104 +291,297 @@ def _load_hotpotqa_bundle(
     )
 
 
-def _load_beir_nq_bundle(
+def _build_squad_bundle(
+    dataset_name: str,
+    display_name: str,
     sample_size: int,
     split: str,
     seed: int,
     cache_dir: str,
     load_dataset_fn: LoadDatasetFn,
 ) -> BenchmarkBundle:
-    if split != "test":
-        raise ValueError("NQ benchmark currently supports split='test' only.")
-
-    queries_ds = load_dataset_fn("Hyukkyu/beir-nq", "queries", split="train", streaming=False, cache_dir=cache_dir)
-    qrels_ds = load_dataset_fn("BeIR/nq-qrels", split="test", streaming=False, cache_dir=cache_dir)
-    corpus_ds = load_dataset_fn("Hyukkyu/beir-nq", "corpus", split="train", streaming=False, cache_dir=cache_dir)
-
-    qrels_by_query: Dict[str, List[str]] = {}
-    for row in qrels_ds:
-        query_id = str(row.get("query-id") or "")
-        corpus_id = str(row.get("corpus-id") or "")
-        if not query_id or not corpus_id:
-            continue
-        qrels_by_query.setdefault(query_id, []).append(corpus_id)
-
-    query_rows: List[Tuple[str, str]] = []
-    for row in queries_ds:
-        query_id = str(row.get("_id") or "")
-        query_text = str(row.get("text") or "").strip()
-        if query_id and query_text and query_id in qrels_by_query:
-            query_rows.append((query_id, query_text))
-
-    random.Random(seed).shuffle(query_rows)
-    selected_queries = query_rows[:sample_size]
-    needed_doc_ids = {
-        doc_id
-        for query_id, _ in selected_queries
-        for doc_id in qrels_by_query.get(query_id, [])
-    }
-
-    page_by_id: Dict[str, BenchmarkPage] = {}
-    for row in corpus_ds:
-        doc_id = str(row.get("_id") or "")
-        if doc_id not in needed_doc_ids:
-            continue
-        title = str(row.get("title") or doc_id).strip()
-        text = str(row.get("text") or "").strip()
-        full_text = f"{title}\n{text}".strip()
-        page_by_id[doc_id] = BenchmarkPage(
-            ref_id=doc_id,
-            title=title,
-            text=full_text,
-            section=f"NQ Benchmark {doc_id}",
-            metadata={"dataset": "nq", "corpus_id": doc_id},
-        )
-        if len(page_by_id) >= len(needed_doc_ids):
-            break
+    ds = load_dataset_fn(dataset_name, split=split, streaming=False, cache_dir=cache_dir)
+    subset = ds.shuffle(seed=seed).select(range(sample_size))
 
     cases: List[BenchmarkCase] = []
+    page_corpus: Dict[Tuple[str, str], BenchmarkPage] = {}
     total_raw_tokens = 0.0
-    used_page_ids = set()
-    for idx, (query_id, query_text) in enumerate(selected_queries):
-        pages = [
-            page_by_id[doc_id]
-            for doc_id in qrels_by_query.get(query_id, [])
-            if doc_id in page_by_id
-        ]
-        if not pages:
+
+    for idx, item in enumerate(subset):
+        title = str(item.get("title") or f"{display_name} Article").strip() or f"{display_name} Article"
+        context = str(item.get("context") or "").strip()
+        if not context:
             continue
-        for page in pages:
-            if page.ref_id not in used_page_ids:
-                total_raw_tokens += len(page.text.split()) * 1.3
-                used_page_ids.add(page.ref_id)
+        page_key = (title, context)
+        if page_key not in page_corpus:
+            ref_id = f"{dataset_name}::{len(page_corpus)}"
+            page_corpus[page_key] = BenchmarkPage(
+                ref_id=ref_id,
+                title=title,
+                text=f"{title}\n{context}".strip(),
+                section=f"{display_name} Benchmark {idx}",
+                metadata={"dataset": dataset_name},
+            )
+            total_raw_tokens += len(context.split()) * 1.3
+        page = page_corpus[page_key]
+        answer_list = [answer.strip() for answer in (item.get("answers") or {}).get("text", []) if str(answer).strip()]
         cases.append(
             BenchmarkCase(
                 idx=idx,
-                query=query_text,
-                expected_answers=[],
-                expected_titles=[page.title for page in pages],
-                pages=pages,
+                query=str(item.get("question") or "").strip(),
+                expected_answers=answer_list,
+                expected_titles=[title],
+                pages=[page],
                 metadata={
-                    "dataset": "nq",
-                    "query_id": query_id,
-                    "relevant_doc_ids": [page.ref_id for page in pages],
+                    "dataset": dataset_name,
+                    "id": item.get("id"),
+                    "is_impossible": bool(item.get("is_impossible", False)),
                 },
             )
         )
 
+    notes = [
+        f"{display_name} uses paragraph-level reference contexts from the official Hugging Face dataset.",
+        "Ragas context metrics use the benchmark reference contexts; answer-dependent metrics are skipped only for answerless rows.",
+    ]
+
     return BenchmarkBundle(
-        name="nq",
-        display_name="Natural Questions (BeIR/NQ)",
+        name=dataset_name,
+        display_name=display_name,
         split=split,
         sample_size=len(cases),
-        retrieval_metric_label="Relevant Passage Title Hit/MRR",
-        answer_metric_label=None,
+        retrieval_metric_label="Ragas context metrics only",
+        answer_metric_label="Ragas answer metrics",
         cases=cases,
-        unique_pages=list(page_by_id.values()),
+        unique_pages=list(page_corpus.values()),
+        total_raw_tokens=total_raw_tokens,
+        notes=notes,
+    )
+
+
+def _load_squad_bundle(
+    sample_size: int,
+    split: str,
+    seed: int,
+    cache_dir: str,
+    load_dataset_fn: LoadDatasetFn,
+) -> BenchmarkBundle:
+    return _build_squad_bundle(
+        dataset_name="squad",
+        display_name="SQuAD",
+        sample_size=sample_size,
+        split=split,
+        seed=seed,
+        cache_dir=cache_dir,
+        load_dataset_fn=load_dataset_fn,
+    )
+
+
+def _load_squad_v2_bundle(
+    sample_size: int,
+    split: str,
+    seed: int,
+    cache_dir: str,
+    load_dataset_fn: LoadDatasetFn,
+) -> BenchmarkBundle:
+    return _build_squad_bundle(
+        dataset_name="squad_v2",
+        display_name="SQuAD 2.0",
+        sample_size=sample_size,
+        split=split,
+        seed=seed,
+        cache_dir=cache_dir,
+        load_dataset_fn=load_dataset_fn,
+    )
+
+
+def _load_musique_bundle(
+    sample_size: int,
+    split: str,
+    seed: int,
+    cache_dir: str,
+    load_dataset_fn: LoadDatasetFn,
+) -> BenchmarkBundle:
+    if load_dataset_fn is load_dataset:
+        subset = _load_remote_parquet_rows(
+            "https://huggingface.co/api/datasets/cmriat/musique/parquet/default/validation/0.parquet",
+            sample_size=sample_size,
+            seed=seed,
+        )
+    else:
+        ds = load_dataset_fn("cmriat/musique", split=split, streaming=False, cache_dir=cache_dir)
+        subset = ds.shuffle(seed=seed).select(range(sample_size))
+
+    cases: List[BenchmarkCase] = []
+    page_corpus: Dict[Tuple[str, str], BenchmarkPage] = {}
+    total_raw_tokens = 0.0
+
+    for idx, item in enumerate(subset):
+        metadata = item.get("metadata") or {}
+        decomposition = _to_list(metadata.get("question_decomposition"))
+        if not decomposition:
+            for paragraph in _to_list(item.get("paragraphs")):
+                if not isinstance(paragraph, dict):
+                    continue
+                decomposition.append(
+                    {
+                        "support_paragraph": {
+                            "title": paragraph.get("title") or paragraph.get("paragraph_title"),
+                            "paragraph_text": paragraph.get("paragraph_text")
+                            or paragraph.get("context")
+                            or paragraph.get("paragraph"),
+                        }
+                    }
+                )
+        pages: List[BenchmarkPage] = []
+        expected_titles: List[str] = []
+        for step in decomposition:
+            if not isinstance(step, dict):
+                continue
+            support = step.get("support_paragraph") or {}
+            title = str(support.get("title") or "").strip()
+            text = str(
+                support.get("paragraph_text")
+                or ""
+            ).strip()
+            if not title or not text:
+                continue
+            page_key = (title, text)
+            if page_key not in page_corpus:
+                ref_id = f"musique::{len(page_corpus)}"
+                page_corpus[page_key] = BenchmarkPage(
+                    ref_id=ref_id,
+                    title=title,
+                    text=f"{title}\n{text}".strip(),
+                    section=f"MuSiQue Benchmark {idx}",
+                    metadata={"dataset": "musique"},
+                )
+                total_raw_tokens += len(text.split()) * 1.3
+            pages.append(page_corpus[page_key])
+            expected_titles.append(title)
+
+        answers = []
+        for field_name in ("answer_aliases", "golden_answers"):
+            for answer in _to_list(item.get(field_name)):
+                normalized = str(answer).strip()
+                if normalized and normalized not in answers:
+                    answers.append(normalized)
+        primary_answer = str(item.get("answer") or "").strip()
+        if primary_answer and primary_answer not in answers:
+            answers.insert(0, primary_answer)
+
+        if not pages or not answers:
+            continue
+
+        cases.append(
+            BenchmarkCase(
+                idx=idx,
+                query=str(item.get("question") or "").strip(),
+                expected_answers=answers,
+                expected_titles=expected_titles,
+                pages=pages,
+                metadata={"dataset": "musique", "id": item.get("id")},
+            )
+        )
+
+    return BenchmarkBundle(
+        name="musique",
+        display_name="MuSiQue",
+        split=split,
+        sample_size=len(cases),
+        retrieval_metric_label="Ragas context metrics + evidence diagnostics",
+        answer_metric_label="Answer EM/F1 + Ragas",
+        cases=cases,
+        unique_pages=list(page_corpus.values()),
         total_raw_tokens=total_raw_tokens,
         notes=[
-            "This NQ track uses BeIR/NQ-style corpus, queries, and qrels rather than answer strings.",
-            "Answer EM/F1 is not reported because this retrieval benchmark package does not provide canonical gold answers.",
+            "MuSiQue uses support paragraphs packaged with each question instance.",
+            "Answer EM/F1 is computed against the provided answer aliases; Ragas uses the benchmark support paragraphs as reference contexts.",
+        ],
+    )
+
+
+def _load_asqa_bundle(
+    sample_size: int,
+    split: str,
+    seed: int,
+    cache_dir: str,
+    load_dataset_fn: LoadDatasetFn,
+) -> BenchmarkBundle:
+    if load_dataset_fn is load_dataset:
+        subset = _load_remote_parquet_rows(
+            "https://huggingface.co/api/datasets/din0s/asqa/parquet/default/dev/0.parquet",
+            sample_size=sample_size,
+            seed=seed,
+        )
+    else:
+        ds = load_dataset_fn("din0s/asqa", split=split, streaming=False, cache_dir=cache_dir)
+        subset = ds.shuffle(seed=seed).select(range(sample_size))
+
+    cases: List[BenchmarkCase] = []
+    page_corpus: Dict[Tuple[str, str], BenchmarkPage] = {}
+    total_raw_tokens = 0.0
+
+    for idx, item in enumerate(subset):
+        annotations = _to_list(item.get("annotations"))
+        expected_answers: List[str] = []
+        pages: List[BenchmarkPage] = []
+        expected_titles: List[str] = []
+
+        for annotation in annotations:
+            if not isinstance(annotation, dict):
+                continue
+            long_answer = str(annotation.get("long_answer") or "").strip()
+            if long_answer and long_answer not in expected_answers:
+                expected_answers.append(long_answer)
+            for knowledge in _to_list(annotation.get("knowledge")):
+                if not isinstance(knowledge, dict):
+                    continue
+                title = str(knowledge.get("wikipage") or knowledge.get("title") or "").strip()
+                text = str(knowledge.get("content") or knowledge.get("text") or "").strip()
+                if not title or not text:
+                    continue
+                page_key = (title, text)
+                if page_key not in page_corpus:
+                    ref_id = f"asqa::{len(page_corpus)}"
+                    page_corpus[page_key] = BenchmarkPage(
+                        ref_id=ref_id,
+                        title=title,
+                        text=f"{title}\n{text}".strip(),
+                        section=f"ASQA Benchmark {idx}",
+                        metadata={"dataset": "asqa"},
+                    )
+                    total_raw_tokens += len(text.split()) * 1.3
+                pages.append(page_corpus[page_key])
+                expected_titles.append(title)
+
+        if not pages or not expected_answers:
+            continue
+
+        cases.append(
+            BenchmarkCase(
+                idx=idx,
+                query=str(item.get("ambiguous_question") or item.get("question") or "").strip(),
+                expected_answers=expected_answers,
+                expected_titles=expected_titles,
+                pages=pages,
+                metadata={"dataset": "asqa", "id": item.get("sample_id") or item.get("id")},
+            )
+        )
+
+    return BenchmarkBundle(
+        name="asqa",
+        display_name="ASQA",
+        split=split,
+        sample_size=len(cases),
+        retrieval_metric_label="Ragas context metrics + evidence diagnostics",
+        answer_metric_label="Long-form answer EM/F1 (diagnostic) + Ragas",
+        cases=cases,
+        unique_pages=list(page_corpus.values()),
+        total_raw_tokens=total_raw_tokens,
+        notes=[
+            "ASQA is long-form grounded QA; Answer Relevancy and Faithfulness remain the primary generation metrics.",
+            "EM/F1 is retained only as a diagnostic because ASQA is not a classic extractive leaderboard.",
         ],
     )
 
